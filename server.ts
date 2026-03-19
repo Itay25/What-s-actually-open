@@ -8,6 +8,7 @@ import axios from "axios";
 import "dotenv/config";
 import logger from "./src/utils/logger";
 import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
+import fs from "fs";
 //import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
 
 // Lazy initialization for Firebase Admin
