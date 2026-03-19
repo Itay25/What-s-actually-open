@@ -23,16 +23,14 @@ function getDb() {
 
         let credential;
 
-        // בדיקה: האם אנחנו ב-Render?
+        // בדיקה: האם אנחנו ב-Render? (משתמשים במשתנה סביבה)
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
           logger.info("Loading credentials from Environment Variable (Render Mode)");
-          // אנחנו הופכים את הטקסט מהמשתנה ל-JSON אמיתי
           const serviceAccountValue = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
           credential = admin.credential.cert(serviceAccountValue);
         } else {
           // אם אנחנו במחשב שלך (פיתוח מקומי)
           logger.info("Loading credentials from local file (Dev Mode)");
-          const fs = require('fs');
           const rawData = fs.readFileSync('./serviceAccountKey.json', 'utf8');
           credential = admin.credential.cert(JSON.parse(rawData));
         }
@@ -46,8 +44,8 @@ function getDb() {
 
       dbInstance = getFirestore(adminApp);
       logger.info("Firestore connected successfully.");
-    } catch (error) {
-      logger.error("Critical error initializing Firebase Admin:", error);
+    } catch (error: any) {
+      logger.error("Critical error initializing Firebase Admin:", error.message);
     }
   }
   return dbInstance;
