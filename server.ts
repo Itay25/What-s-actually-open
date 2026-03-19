@@ -8,7 +8,7 @@ import axios from "axios";
 import "dotenv/config";
 import logger from "./src/utils/logger";
 import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
-import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
+//import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
 
 // Lazy initialization for Firebase Admin
 let dbInstance: admin.firestore.Firestore | null = null;
@@ -18,17 +18,33 @@ function getDb() {
   if (!dbInstance) {
     try {
       if (!admin.apps.length) {
-        logger.info("Initializing Firebase Admin with Service Account...");
+        logger.info("Initializing Firebase Admin...");
+
+        let credential;
+
+        // בדיקה: האם אנחנו ב-Render?
+        if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+          logger.info("Loading credentials from Environment Variable (Render Mode)");
+          // אנחנו הופכים את הטקסט מהמשתנה ל-JSON אמיתי
+          const serviceAccountValue = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+          credential = admin.credential.cert(serviceAccountValue);
+        } else {
+          // אם אנחנו במחשב שלך (פיתוח מקומי)
+          logger.info("Loading credentials from local file (Dev Mode)");
+          const fs = require('fs');
+          const rawData = fs.readFileSync('./serviceAccountKey.json', 'utf8');
+          credential = admin.credential.cert(JSON.parse(rawData));
+        }
+
         adminApp = admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount as any)
+          credential: credential
         });
       } else {
         adminApp = admin.apps[0]!;
       }
 
-      logger.debug("SERVER PROJECT ID:", adminApp.options.projectId);
       dbInstance = getFirestore(adminApp);
-      logger.info("Firestore instance acquired successfully.");
+      logger.info("Firestore connected successfully.");
     } catch (error) {
       logger.error("Critical error initializing Firebase Admin:", error);
     }
