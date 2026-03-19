@@ -56,6 +56,10 @@ web_modules/
 # Optional stylelint cache
 .stylelintcache
 
+# firebase key 
+firebase-admin-key.json
+.env
+
 # Optional REPL history
 .node_repl_history
 
