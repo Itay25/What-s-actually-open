@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "userApiUsage": {
+      "title": "User API Usage",
+      "description": "Tracks daily Google Places API usage per user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "count": { "type": "integer" }
+      },
+      "required": ["userId", "date", "count"]
+    },
+    "globalApiUsage": {
+      "title": "Global API Usage",
+      "description": "Tracks daily global Google Places API usage",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "count": { "type": "integer" }
+      },
+      "required": ["date", "count"]
+    }
+  },
+  "firestore": {
+    "/userApiUsage/{usageId}": {
+      "schema": "userApiUsage",
+      "description": "Collection for user-specific API usage tracking"
+    },
+    "/globalApiUsage/{date}": {
+      "schema": "globalApiUsage",
+      "description": "Collection for global API usage tracking"
+    }
+  }
+}

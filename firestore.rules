@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: places
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - lat: number (required)
+    //   - lng: number (required)
+    //   - category: string (required)
+    //   - status: string (optional)
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //
+    // Collection: userApiUsage
+    // Fields:
+    //   - userId: string (required)
+    //   - date: string (required)
+    //   - count: number (required)
+    //
+    // Collection: globalApiUsage
+    // Fields:
+    //   - date: string (required)
+    //   - count: number (required)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidPlace(data) {
+      return data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
+             data.lat is number &&
+             data.lng is number &&
+             data.category is string;
+    }
+
+    function isValidUser(data) {
+      return data.uid is string &&
+             data.email is string;
+    }
+
+    // Places collection
+    match /places/{placeId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated() && isValidPlace(request.resource.data);
+      allow delete: if false; // Only admins can delete
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    // API Usage collections - Backend only (Admin SDK)
+    match /userApiUsage/{usageId} {
+      allow read, write: if false;
+    }
+    
+    match /globalApiUsage/{date} {
+      allow read, write: if false;
+    }
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
