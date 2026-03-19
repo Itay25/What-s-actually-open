@@ -243,8 +243,9 @@ async function startServer() {
         // Protection Layer - Check only
         const usage = await checkApiUsage(userId);
         if (!usage.allowed) {
-          throw { status: 429, message: usage.error };
-        }
+  logger.warn(`API limit reached for user ${userId}: ${usage.error}`);
+  return { places: [] };
+}
 
         const apiKey = process.env.VITE_GOOGLE_MAPS_API_KEY;
         if (!apiKey) {
@@ -330,8 +331,9 @@ async function startServer() {
         // Protection Layer - Check only
         const usage = await checkApiUsage(userId);
         if (!usage.allowed) {
-          throw { status: 429, message: usage.error };
-        }
+  logger.warn(`API limit reached for user ${userId}: ${usage.error}`);
+  return { places: [] };
+}
 
         const apiKey = process.env.VITE_GOOGLE_MAPS_API_KEY;
         if (!apiKey) {
