@@ -46,12 +46,12 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     const currentZoom = map.getZoom();
 
     const maxZoom = map.getMaxZoom() === Infinity ? 18 : map.getMaxZoom();
-    const minFetchZoom = maxZoom - 3;
+    const minFetchZoom = maxZoom - 6; // Relaxed from -3 to -6 to show more places when zoomed out
     const isHighZoom = currentZoom >= minFetchZoom;
 
     // 1. Zoom level check (Primary condition)
-    if (!isHighZoom) {
-      // Restrict fetching new places when zoomed out too far
+    if (!isHighZoom && !activeCategory) {
+      // Still restrict fetching when zoomed out too far UNLESS a category is selected
       return;
     }
 
