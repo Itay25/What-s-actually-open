@@ -143,9 +143,16 @@ export const BusinessMarker = React.memo(({ place, isActive, zoom, showLabel, la
                 textShadow: '0 0 4px white, 0 0 4px white, 0 0 4px white, 0 0 4px white, 0 0 8px white' 
               }}
             >
-              <span className="text-[13px] font-bold text-black leading-none whitespace-nowrap tracking-tight">
-                {shortenName(place.name)}
-              </span>
+              <div className="flex items-center gap-1">
+                <span className="text-[13px] font-bold text-black leading-none whitespace-nowrap tracking-tight">
+                  {shortenName(place.name)}
+                </span>
+                {place.isFallback && (
+                  <span className="text-[9px] font-medium text-blue-600 bg-blue-50 px-1 rounded border border-blue-200">
+                    בקרבת מקום
+                  </span>
+                )}
+              </div>
               {labelType === 'full' && (
                 <span className="text-[10px] font-medium text-gray-600 leading-tight whitespace-nowrap mt-0.5">
                   {place.category}
@@ -168,6 +175,7 @@ export const BusinessMarker = React.memo(({ place, isActive, zoom, showLabel, la
     prevProps.isLabelDimmed === nextProps.isLabelDimmed &&
     prevProps.place.id === nextProps.place.id &&
     prevProps.place.status === nextProps.place.status &&
+    prevProps.place.isFallback === nextProps.place.isFallback &&
     prevProps.place.reportsOpen === nextProps.place.reportsOpen &&
     prevProps.place.reportsClosed === nextProps.place.reportsClosed &&
     prevProps.place.lastReportTime === nextProps.place.lastReportTime
