@@ -160,7 +160,7 @@ function sanitizePlace(data: any): Place {
 /**
  * Helper to get places from Firestore based on bounds and category.
  */
-async function getPlacesFromDB(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null): Promise<Place[]> {
+async function getPlacesFromDB(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, center?: { lat: number, lng: number }): Promise<Place[]> {
   const cacheKey = `${bounds.north.toFixed(3)},${bounds.south.toFixed(3)},${bounds.east.toFixed(3)},${bounds.west.toFixed(3)}-${categoryId || 'all'}`;
   const cached = dbCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < DB_CACHE_EXPIRY) {
@@ -170,14 +170,12 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
   try {
     const placesRef = collection(db, 'places');
     
-    // To avoid requiring complex composite indexes (which cause errors if not manually created),
-    // we use a single-field range query on 'lat' and filter 'lng' and 'category' in memory.
-    // This is highly efficient when combined with the 200-document limit.
+    // To avoid requiring complex composite indexes, we use a single-field range query on 'lat'
     const q = query(
       placesRef,
       where('lat', '>=', bounds.south),
       where('lat', '<=', bounds.north),
-      limit(200)
+      limit(300) // Increased limit for better filtering
     );
     
     const querySnapshot = await getDocs(q);
@@ -197,6 +195,15 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
         places.push(sanitizePlace(data));
       }
     });
+
+    // Sort by distance if center is provided
+    if (center) {
+      places.sort((a, b) => {
+        const distA = Math.pow(a.lat - center.lat, 2) + Math.pow(a.lng - center.lng, 2);
+        const distB = Math.pow(b.lat - center.lat, 2) + Math.pow(b.lng - center.lng, 2);
+        return distA - distB;
+      });
+    }
     
     // Update cache
     dbCache.set(cacheKey, { places, timestamp: Date.now() });
@@ -318,27 +325,87 @@ async function savePlaceToDB(place: Place) {
 
 /**
  * Service to discover businesses within map bounds using Google Places API (New).
+ * Implements fallback logic and radius expansion to ensure the map is never empty.
  */
 export async function discoverPlaces(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, userId?: string): Promise<Place[]> {
-  // 1. Check DB First
-  const dbPlaces = await getPlacesFromDB(bounds, categoryId);
-  if (dbPlaces.length > 0) {
-    return dbPlaces;
+  const MIN_RESULTS = 10;
+  const MAX_RESULTS = 50;
+  const center = {
+    lat: (bounds.north + bounds.south) / 2,
+    lng: (bounds.east + bounds.west) / 2
+  };
+
+  // 1. Add padding to bounds (approx 15%) to avoid missing nearby places
+  const latDiff = bounds.north - bounds.south;
+  const lngDiff = bounds.east - bounds.west;
+  const paddedBounds = {
+    north: bounds.north + latDiff * 0.15,
+    south: bounds.south - latDiff * 0.15,
+    east: bounds.east + lngDiff * 0.15,
+    west: bounds.west - lngDiff * 0.15
+  };
+
+  // Helper to deduplicate and limit results
+  const mergeResults = (existing: Place[], newPlaces: Place[]) => {
+    const seen = new Set(existing.map(p => p.id));
+    const merged = [...existing];
+    newPlaces.forEach(p => {
+      if (!seen.has(p.id)) {
+        merged.push(p);
+        seen.add(p.id);
+      }
+    });
+    return merged;
+  };
+
+  // --- STAGE 1: DB FETCH ---
+  // Try DB with category
+  let results = await getPlacesFromDB(paddedBounds, categoryId, center);
+
+  // Fallback: If results < MIN_RESULTS and we had a category, try DB without category
+  if (results.length < MIN_RESULTS && categoryId) {
+    const unfiltered = await getPlacesFromDB(paddedBounds, null, center);
+    results = mergeResults(results, unfiltered);
   }
 
-  // If no results in DB, we proceed to Google API via Backend
+  // --- STAGE 2: RADIUS EXPANSION (DB) ---
+  // If still < MIN_RESULTS, expand bounds gradually (up to 3-4x)
+  let currentBounds = { ...paddedBounds };
+  let expansionCount = 0;
+  while (results.length < MIN_RESULTS && expansionCount < 3) {
+    expansionCount++;
+    // If we have 0 results, expand more aggressively (x2), otherwise x1.5
+    const factor = results.length === 0 ? 2.0 : 1.5;
+    const currentLatDiff = currentBounds.north - currentBounds.south;
+    const currentLngDiff = currentBounds.east - currentBounds.west;
+    
+    currentBounds = {
+      north: center.lat + (currentLatDiff * factor) / 2,
+      south: center.lat - (currentLatDiff * factor) / 2,
+      east: center.lng + (currentLngDiff * factor) / 2,
+      west: center.lng - (currentLngDiff * factor) / 2
+    };
+    
+    const expandedResults = await getPlacesFromDB(currentBounds, null, center);
+    results = mergeResults(results, expandedResults);
+  }
+
+  // If we found enough in DB, return them
+  if (results.length >= MIN_RESULTS) {
+    return results.slice(0, MAX_RESULTS);
+  }
+
+  // --- STAGE 3: GOOGLE API DISCOVERY ---
+  // If no results in DB or still too few, proceed to Google API via Backend
   if (!userId) {
     logger.warn("User not authenticated, skipping Google API discovery.");
-    return [];
+    return results.slice(0, MAX_RESULTS);
   }
 
   try {
-    const centerLat = (bounds.north + bounds.south) / 2;
-    const centerLng = (bounds.east + bounds.west) / 2;
-    
     const radius = Math.sqrt(
-      Math.pow((bounds.north - bounds.south) * 111320, 2) +
-      Math.pow((bounds.east - bounds.west) * 111320 * Math.cos(centerLat * Math.PI / 180), 2)
+      Math.pow((currentBounds.north - currentBounds.south) * 111320, 2) +
+      Math.pow((currentBounds.east - currentBounds.west) * 111320 * Math.cos(center.lat * Math.PI / 180), 2)
     ) / 2;
 
     // Map category ID to Google Places types
@@ -384,7 +451,7 @@ export async function discoverPlaces(bounds: { north: number; south: number; eas
           rankPreference: "DISTANCE",
           locationRestriction: {
             circle: {
-              center: { latitude: centerLat, longitude: centerLng },
+              center: { latitude: center.lat, longitude: center.lng },
               radius: Math.min(radius, 50000)
             }
           }
@@ -392,8 +459,6 @@ export async function discoverPlaces(bounds: { north: number; south: number; eas
       });
 
       if (response.status === 429) {
-        const errorData = await response.json();
-        alert(errorData.error);
         return [];
       }
 
@@ -404,14 +469,14 @@ export async function discoverPlaces(bounds: { north: number; south: number; eas
       });
     };
 
-    const results = await Promise.all(categoryGroups.map(fetchGroup));
-    const allPlaces = results.flat();
+    const resultsFromGoogle = await Promise.all(categoryGroups.map(fetchGroup));
+    const allGooglePlaces = resultsFromGoogle.flat();
 
     const uniquePlacesMap = new Map();
-    allPlaces.forEach(p => uniquePlacesMap.set(p.id, p));
-    const uniquePlaces = Array.from(uniquePlacesMap.values());
+    allGooglePlaces.forEach(p => uniquePlacesMap.set(p.id, p));
+    const uniqueGooglePlaces = Array.from(uniquePlacesMap.values());
 
-    const processedPlaces = await Promise.all(uniquePlaces.map(async (p: any) => {
+    const processedGooglePlaces = await Promise.all(uniqueGooglePlaces.map(async (p: any) => {
       const photoReference = p.photos?.[0]?.name;
       const category = mapGoogleTypeToCategory(p.types, p.primaryType);
       const name = p.displayName?.text || "עסק ללא שם";
@@ -450,14 +515,24 @@ export async function discoverPlaces(bounds: { north: number; south: number; eas
       return place;
     }));
 
-    return processedPlaces.filter(p => {
+    const filteredGoogleResults = processedGooglePlaces.filter(p => {
       if (p.category === 'כספומטים' && p.isSuspicious) return false;
       if (isPlaceIncomplete(p)) return false;
       return true;
     });
+
+    // Final merge and sort by distance
+    const finalResults = mergeResults(results, filteredGoogleResults);
+    finalResults.sort((a, b) => {
+      const distA = Math.pow(a.lat - center.lat, 2) + Math.pow(a.lng - center.lng, 2);
+      const distB = Math.pow(b.lat - center.lat, 2) + Math.pow(b.lng - center.lng, 2);
+      return distA - distB;
+    });
+
+    return finalResults.slice(0, MAX_RESULTS);
   } catch (error) {
     console.error("Error discovering places:", error);
-    return [];
+    return results.slice(0, MAX_RESULTS);
   }
 }
 
@@ -557,8 +632,6 @@ async function internalSearchPlaces(queryStr: string, locationBias?: { lat: numb
     });
 
     if (response.status === 429) {
-      const errorData = await response.json();
-      alert(errorData.error);
       return dbResults;
     }
 
