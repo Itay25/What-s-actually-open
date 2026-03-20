@@ -67,6 +67,7 @@ export interface Place {
   easyStatus?: 'open' | 'closed' | 'maybe';
   isSuspicious?: boolean;
   isLocal?: boolean;
+  isFallback?: boolean;
   popularTimes?: PopularTimesDay[];
   reportsOpen?: number;
   reportsClosed?: number;
