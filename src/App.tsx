@@ -828,8 +828,8 @@ export default function App() {
 
   // Progressive Disclosure & Selective Density Logic
   const processedPlaces = React.useMemo(() => {
-    // 1. Zoom < 14: Show nothing
-    if (mapZoom < 14) return [];
+    // 1. Zoom < 13: Show nothing
+    if (mapZoom < 13) return [];
 
     // Calculate prominence scores and sort
     const scoredPlaces = filteredPlaces.map(p => ({
@@ -838,8 +838,14 @@ export default function App() {
     })).sort((a, b) => b.prominenceScore - a.prominenceScore);
 
     // 2. Select prominent businesses for full icons
-    // If a category is active, we show ALL matching businesses as prominent
-    const topCount = activeCategory ? scoredPlaces.length : 18;
+    // Density increases with zoom level
+    let baseCount = 12;
+    if (mapZoom >= 14) baseCount = 20;
+    if (mapZoom >= 15) baseCount = 35;
+    if (mapZoom >= 16) baseCount = 50;
+    if (mapZoom >= 17) baseCount = 80;
+    
+    const topCount = activeCategory ? scoredPlaces.length : baseCount;
     let prominent = scoredPlaces.slice(0, topCount);
     let others = scoredPlaces.slice(topCount);
 
@@ -858,6 +864,7 @@ export default function App() {
         }
         return true;
       });
+      // Put promoted items at the VERY BEGINNING so they get priority in collision detection
       prominent = [...toPromote, ...prominent];
     }
 
@@ -866,17 +873,22 @@ export default function App() {
     const occupiedIconPositions: { lat: number; lng: number }[] = [];
     const occupiedLabelPositions: { lat: number; lng: number }[] = [];
     
-    const iconThreshold = 0.0004 / Math.pow(2, mapZoom - 15);
-    const labelThresholdLat = 0.0008 / Math.pow(2, mapZoom - 15);
-    const labelThresholdLng = 0.0025 / Math.pow(2, mapZoom - 15);
+    // Thresholds decrease as we zoom in (allowing more density)
+    const iconThreshold = 0.00035 / Math.pow(2, mapZoom - 15);
+    const labelThresholdLat = 0.0007 / Math.pow(2, mapZoom - 15);
+    const labelThresholdLng = 0.0022 / Math.pow(2, mapZoom - 15);
 
     for (const place of prominent) {
+      const isAlwaysVisible = alwaysProminentIds.has(place.id);
+      
       const isIconOverlap = occupiedIconPositions.some(pos => 
         Math.abs(pos.lat - place.lat) < iconThreshold && 
         Math.abs(pos.lng - place.lng) < iconThreshold
       );
 
-      if (!isIconOverlap) {
+      // Selected/Pinned places bypass collision detection for visibility, 
+      // but they still contribute to occupied positions
+      if (!isIconOverlap || isAlwaysVisible) {
         const isLabelOverlap = occupiedLabelPositions.some(pos => 
           Math.abs(pos.lat - place.lat) < labelThresholdLat && 
           Math.abs(pos.lng - place.lng) < labelThresholdLng
@@ -885,9 +897,14 @@ export default function App() {
         let labelType: 'none' | 'short' | 'full' = 'none';
         let isLabelDimmed = false;
         
-        if (!isLabelOverlap) {
+        if (!isLabelOverlap || isAlwaysVisible) {
           if (mapZoom >= 17) labelType = 'full';
           else if (mapZoom >= 15) labelType = 'short';
+          
+          // If it's forced visible but overlaps, we might dim the label
+          if (isLabelOverlap && isAlwaysVisible) {
+            isLabelDimmed = true;
+          }
         } else {
           // If it overlaps, show it dimmed instead of hiding if we're zoomed in enough
           if (mapZoom >= 17) {
@@ -917,7 +934,7 @@ export default function App() {
     const dimmedOthers = others.map(p => ({ ...p, isDimmed: true, showLabel: false, labelType: 'none' as const, isLabelDimmed: false }));
 
     return [...visibleProminent, ...dimmedOthers];
-  }, [filteredPlaces, mapZoom, calculateProminenceScore]);
+  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces, activeCategory]);
 
   // Handle exit animations by keeping places in state for a short duration
   useEffect(() => {
