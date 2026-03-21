@@ -318,6 +318,7 @@ async function savePlaceToDB(place: Place) {
       confirmations: place.confirmations,
       officialOpen: place.officialOpen,
       address: place.address || '',
+      source: place.source || 'google',
     };
 
     // Add optional fields only if they are defined
@@ -478,6 +479,79 @@ async function internalSearchPlaces(queryStr: string, locationBias?: { lat: numb
   
   // 2. Intelligent API Fallback - REMOVED to prevent external API calls and save quota/DB writes
   return dbResults;
+}
+
+/**
+ * Search Google Places via backend API.
+ */
+export async function searchGooglePlaces(queryStr: string, locationBias?: { lat: number; lng: number }, userId?: string): Promise<Place[]> {
+  if (!queryStr || !userId) return [];
+
+  try {
+    const response = await fetch('/api/places/search', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        query: queryStr,
+        locationBias: locationBias ? {
+          circle: {
+            center: { latitude: locationBias.lat, longitude: locationBias.lng },
+            radius: 5000
+          }
+        } : undefined,
+        languageCode: 'he'
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to search Google Places');
+    }
+
+    const data = await response.json();
+    if (!data.places) return [];
+
+    return data.places.map((p: any) => {
+      const lat = p.location?.latitude;
+      const lng = p.location?.longitude;
+      
+      const place: Place = {
+        id: p.id,
+        name: p.displayName?.text || 'עסק ללא שם',
+        lat,
+        lng,
+        address: p.formattedAddress || '',
+        category: mapGoogleTypeToCategory(p.types || []),
+        peopleCount: 0,
+        lastUpdate: new Date().toLocaleString('he-IL'),
+        lastUpdateTimestamp: Date.now(),
+        confirmations: 0,
+        officialOpen: true,
+        source: 'google',
+        isLocal: false
+      };
+
+      // Add opening hours if available
+      if (p.regularOpeningHours) {
+        place.openingHours = p.regularOpeningHours.weekdayDescriptions;
+        place.normalizedOpeningHours = normalizeOpeningHours(p.regularOpeningHours.weekdayDescriptions);
+      }
+
+      // Add image if available
+      if (p.photos && p.photos.length > 0) {
+        place.imageUrl = getPlacePhotoUrl(p.photos[0].name, place.category, place.id);
+        place.potentialImages = p.photos.map((photo: any) => getPlacePhotoUrl(photo.name, place.category, place.id));
+      }
+
+      return place;
+    });
+  } catch (error) {
+    logger.error("Error searching Google Places:", error);
+    throw error;
+  }
 }
 
 /**
