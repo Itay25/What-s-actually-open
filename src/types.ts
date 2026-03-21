@@ -68,6 +68,8 @@ export interface Place {
   isSuspicious?: boolean;
   isLocal?: boolean;
   isFallback?: boolean;
+  isPrecision?: boolean;
+  source?: string;
   popularTimes?: PopularTimesDay[];
   reportsOpen?: number;
   reportsClosed?: number;
