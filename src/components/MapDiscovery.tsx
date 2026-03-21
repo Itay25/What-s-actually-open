@@ -36,6 +36,8 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
   const isRequestInProgress = useRef<boolean>(false);
   const dataCache = useRef<Map<string, { places: Place[], loadedAt: number }>>(new Map());
   
+  const lastRequestTime = useRef<number>(0);
+  
   const handleMove = useCallback(async (force: boolean = false) => {
     const bounds = map.getBounds();
     if (!bounds.isValid()) return;
@@ -56,19 +58,30 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     }
 
     // 2. Movement/Zoom Change detection
-    const zoomChanged = currentZoom !== lastZoom.current;
+    const zoomDiff = Math.abs(currentZoom - lastZoom.current);
+    const isZoomingIn = currentZoom > lastZoom.current;
+    const zoomChanged = zoomDiff >= 0.5; // Threshold of 0.5 as requested
     
     const distanceMoved = lastQueryLocation.current 
       ? getDistance(currentLat, currentLng, lastQueryLocation.current.lat, lastQueryLocation.current.lng)
       : Infinity;
     
-    // Relaxed movement threshold for high zoom: 100 meters (was 300)
-    const movementThreshold = 100; 
+    // Movement threshold: 300 meters as requested
+    const movementThreshold = 300; 
     const movedSignificantly = distanceMoved > movementThreshold;
     const categoryChanged = activeCategory !== lastCategory.current;
 
     // If nothing changed significantly and not forced, do nothing
     if (!force && lastQueryLocation.current && !categoryChanged && !zoomChanged && !movedSignificantly) {
+      return;
+    }
+
+    // 3. Rate Limit: Max 1 query per 1 second
+    const now = Date.now();
+    if (!force && now - lastRequestTime.current < 1000) {
+      // If we're within the rate limit, schedule another check if we haven't already
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      debounceTimer.current = setTimeout(() => handleMove(force), 1000 - (now - lastRequestTime.current));
       return;
     }
     
@@ -88,13 +101,14 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     const boundsKey = `${north.toFixed(precision)},${south.toFixed(precision)},${east.toFixed(precision)},${west.toFixed(precision)}`;
     const cacheKey = `${boundsKey}-${activeCategory || 'all'}`;
     
-    // Viewport cache expiry: 300 seconds (5 minutes)
+    // Viewport cache expiry: 60 seconds (as requested in previous turn, keeping it)
     const cachedData = dataCache.current.get(cacheKey);
-    const isCacheExpired = cachedData ? (Date.now() - cachedData.loadedAt > 300000) : true;
+    const isCacheExpired = cachedData ? (Date.now() - cachedData.loadedAt > 60000) : true;
 
     // 3. Cache check
     // If we have valid cache, use it instead of fetching from server
-    if (!force && cachedData && !isCacheExpired) {
+    // IGNORE cache if zooming in significantly or zoom changed
+    if (!force && cachedData && !isCacheExpired && !isZoomingIn) {
       onDiscovery(cachedData.places);
       lastQueryLocation.current = { lat: currentLat, lng: currentLng };
       lastZoom.current = currentZoom;
@@ -109,6 +123,7 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     lastZoom.current = currentZoom;
     lastCategory.current = activeCategory;
 
+    lastRequestTime.current = Date.now();
     onZoomChange(currentZoom);
     
     onLoading(true);
@@ -121,7 +136,7 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
         south,
         east,
         west
-      }, activeCategory, userProfile?.uid);
+      }, activeCategory, userProfile?.uid, currentZoom);
       
       // Update cache
       dataCache.current.set(cacheKey, { places: discovered, loadedAt: Date.now() });
@@ -132,7 +147,10 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
 
       onDiscovery(discovered);
     } catch (error) {
-      logger.error("Discovery failed:", error);
+      // Only log critical errors
+      if (error instanceof Error && !error.message.includes('Quota exceeded')) {
+        logger.error("Discovery failed:", error);
+      }
     } finally {
       onLoading(false);
       isRequestInProgress.current = false;
@@ -141,15 +159,16 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
 
   const debouncedHandleMove = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(handleMove, 300); // Debounce delay of 300ms
+    debounceTimer.current = setTimeout(handleMove, 600); // Debounce delay of 600ms (as requested)
   }, [handleMove]);
 
   const debouncedHandleZoom = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {
       onZoomChange(map.getZoom());
-    }, 300);
-  }, [map, onZoomChange]);
+      handleMove(); // Also trigger move logic on zoom
+    }, 600);
+  }, [map, onZoomChange, handleMove]);
 
   useEffect(() => {
     if (refreshTrigger > lastRefresh.current) {
