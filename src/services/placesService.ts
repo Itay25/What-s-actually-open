@@ -163,8 +163,8 @@ function sanitizePlace(data: any): Place {
 /**
  * Helper to get places from Firestore based on bounds and category.
  */
-async function getPlacesFromDB(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, center?: { lat: number, lng: number }): Promise<Place[]> {
-  const precision = 3; // Use 3 decimal places for cache key (approx 110m)
+async function getPlacesFromDB(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, center?: { lat: number, lng: number }, zoom: number = 15): Promise<Place[]> {
+  const precision = 3; // Use 3 decimal places for cache key (approx 110m) as requested
   const cacheKey = `${bounds.north.toFixed(precision)},${bounds.south.toFixed(precision)},${bounds.east.toFixed(precision)},${bounds.west.toFixed(precision)}-${categoryId || 'all'}`;
   
   // 1. Check cache first
@@ -183,12 +183,22 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
     try {
       const placesRef = collection(db, 'places');
       
-      // To avoid requiring complex composite indexes, we use a single-field range query on 'lat'
+      // Determine limit based on zoom level
+      let maxResults = 50;
+      if (zoom >= 17) maxResults = 50;
+      else if (zoom >= 15) maxResults = 35;
+      else if (zoom >= 13) maxResults = 20;
+      else maxResults = 10;
+
+      // Viewport-only query: Filter by latitude AND longitude range in DB
+      // Note: This requires a composite index on (lat, lng)
       const q = query(
         placesRef,
         where('lat', '>=', bounds.south),
         where('lat', '<=', bounds.north),
-        limit(100) // Reduced limit to save reads, still enough for viewport
+        where('lng', '>=', bounds.west),
+        where('lng', '<=', bounds.east),
+        limit(maxResults)
       );
       
       const querySnapshot = await getDocs(q);
@@ -198,13 +208,10 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
       querySnapshot.forEach((doc) => {
         const data = doc.data() as any;
         
-        // 1. Filter longitude in memory
-        const isInLngBounds = data.lng >= bounds.west && data.lng <= bounds.east;
-        
-        // 2. Filter category in memory (if active)
+        // Filter category in memory (if active)
         const matchesCategory = !targetCategory || data.category === targetCategory;
 
-        if (isInLngBounds && matchesCategory) {
+        if (matchesCategory) {
           places.push(sanitizePlace(data));
         }
       });
@@ -218,14 +225,17 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
         });
       }
       
+      // Apply the final zoom-based limit
+      const limitedPlaces = places.slice(0, maxResults);
+
       // Update cache
-      dbCache.set(cacheKey, { places, timestamp: Date.now() });
+      dbCache.set(cacheKey, { places: limitedPlaces, timestamp: Date.now() });
       if (dbCache.size > 100) {
         const firstKey = dbCache.keys().next().value;
         if (firstKey) dbCache.delete(firstKey);
       }
 
-      return places;
+      return limitedPlaces;
     } catch (error) {
       logger.error("Error fetching from DB:", error);
       return [];
@@ -344,191 +354,44 @@ async function savePlaceToDB(place: Place) {
 }
 
 /**
- * Helper to fetch nearest available places to current map center.
+ * Service to discover businesses within map bounds.
+ * Strictly viewport-based queries with no fallback logic.
+ * Implements minimal empty-state protection by expanding bounds once if results are low.
  */
-async function getNearestPlaces(center: { lat: number, lng: number }, limitCount: number = 15): Promise<Place[]> {
-  try {
-    const placesRef = collection(db, 'places');
-    // Simple range query on lat to get candidates near the center
-    const q = query(
-      placesRef,
-      where('lat', '>=', center.lat - 0.2),
-      where('lat', '<=', center.lat + 0.2),
-      limit(50)
-    );
-    const querySnapshot = await getDocs(q);
-    const places: Place[] = [];
-    querySnapshot.forEach((doc) => {
-      places.push(sanitizePlace(doc.data()));
-    });
-    
-    // Sort by distance and take top N
-    places.sort((a, b) => {
-      const distA = Math.pow(a.lat - center.lat, 2) + Math.pow(a.lng - center.lng, 2);
-      const distB = Math.pow(b.lat - center.lat, 2) + Math.pow(b.lng - center.lng, 2);
-      return distA - distB;
-    });
-    
-    return places.slice(0, limitCount);
-  } catch (error) {
-    logger.error("Error fetching nearest places:", error);
-    return [];
-  }
-}
-
-/**
- * Service to discover businesses within map bounds using Google Places API (New).
- * Implements smart fallback logic and radius expansion to ensure the map is never empty.
- */
-export async function discoverPlaces(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, userId?: string): Promise<Place[]> {
-  const MIN_RESULTS = 3; // Only trigger fallback if results <= 3
-  const MAX_RESULTS = 100;
+export async function discoverPlaces(bounds: { north: number; south: number; east: number; west: number }, categoryId?: string | null, userId?: string, zoom: number = 15): Promise<Place[]> {
   const center = {
     lat: (bounds.north + bounds.south) / 2,
     lng: (bounds.east + bounds.west) / 2
   };
 
-  // Helper to deduplicate and limit results
-  const mergeResults = (existing: Place[], newPlaces: Place[], isFallback: boolean = false) => {
-    const seen = new Set(existing.map(p => p.id));
-    const merged = [...existing];
-    newPlaces.forEach(p => {
+  // 1. Initial fetch
+  let results = await getPlacesFromDB(bounds, categoryId, center, zoom);
+
+  // 2. Minimal empty-state protection: If results < 5, expand bounds by 1.2x ONLY ONCE
+  if (results.length < 5) {
+    const latDiff = bounds.north - bounds.south;
+    const lngDiff = bounds.east - bounds.west;
+    const expandedBounds = {
+      north: center.lat + (latDiff * 1.2) / 2,
+      south: center.lat - (latDiff * 1.2) / 2,
+      east: center.lng + (lngDiff * 1.2) / 2,
+      west: center.lng - (lngDiff * 1.2) / 2
+    };
+    
+    // Fetch again with expanded bounds
+    const expandedResults = await getPlacesFromDB(expandedBounds, categoryId, center, zoom);
+    
+    // Merge and deduplicate
+    const seen = new Set(results.map(p => p.id));
+    expandedResults.forEach(p => {
       if (!seen.has(p.id)) {
-        merged.push({ ...p, isFallback });
+        results.push(p);
         seen.add(p.id);
       }
     });
-    return merged;
-  };
-
-  // --- STAGE 1: INITIAL DB FETCH (Exact match) ---
-  let results = await getPlacesFromDB(bounds, categoryId, center);
-
-  // --- STAGE 2: SMART FALLBACK LOGIC ---
-  if (results.length <= MIN_RESULTS) {
-    
-    // Priority 2: Expanded bounds (same category)
-    if (categoryId) {
-      console.log("Fallback triggered: expanding bounds (same category)");
-      const latDiff = bounds.north - bounds.south;
-      const lngDiff = bounds.east - bounds.west;
-      const expandedBounds = {
-        north: center.lat + (latDiff * 1.5) / 2,
-        south: center.lat - (latDiff * 1.5) / 2,
-        east: center.lng + (lngDiff * 1.5) / 2,
-        west: center.lng - (lngDiff * 1.5) / 2
-      };
-      const expandedResults = await getPlacesFromDB(expandedBounds, categoryId, center);
-      results = mergeResults(results, expandedResults, true);
-    }
-
-    // Priority 3: No category (original bounds)
-    if (results.length <= MIN_RESULTS && categoryId) {
-      console.log("Fallback triggered: removing category filter");
-      const unfiltered = await getPlacesFromDB(bounds, null, center);
-      results = mergeResults(results, unfiltered, true);
-    }
-
-    // Priority 4: Nearby fallback (distance-based, regardless of bounds)
-    if (results.length <= MIN_RESULTS) {
-      console.log("Fallback triggered: fetching nearest available places");
-      const nearby = await getNearestPlaces(center, 15);
-      results = mergeResults(results, nearby, true);
-    }
   }
 
-  // Final sort by distance from center
-  results.sort((a, b) => {
-    const distA = Math.pow(a.lat - center.lat, 2) + Math.pow(a.lng - center.lng, 2);
-    const distB = Math.pow(b.lat - center.lat, 2) + Math.pow(b.lng - center.lng, 2);
-    return distA - distB;
-  });
-
-  // If we still have very few results and user is authenticated, try Google API (optional discovery)
-  if (results.length < 3 && userId) {
-    try {
-      const googleResults = await fetchGoogleDiscovery(bounds, categoryId, center, userId);
-      results = mergeResults(results, googleResults);
-    } catch (e) {
-      // Ignore Google API errors in fallback
-    }
-  }
-
-  return results.slice(0, MAX_RESULTS);
-}
-
-/**
- * Extracted Google Discovery logic for cleaner fallback
- */
-async function fetchGoogleDiscovery(bounds: { north: number; south: number; east: number; west: number }, categoryId: string | null | undefined, center: { lat: number, lng: number }, userId: string): Promise<Place[]> {
-  const radius = Math.sqrt(
-    Math.pow((bounds.north - bounds.south) * 111320, 2) +
-    Math.pow((bounds.east - bounds.west) * 111320 * Math.cos(center.lat * Math.PI / 180), 2)
-  ) / 2;
-
-  const categoryTypeMap: Record<string, string[]> = {
-    'super': ["supermarket", "grocery_store", "convenience_store", "market"],
-    'cafe': ["cafe", "coffee_shop"],
-    'restaurant': ["restaurant", "pizza_restaurant", "hamburger_restaurant", "sushi_restaurant"],
-    'pharmacy': ["pharmacy", "drugstore"],
-    'gas': ["gas_station"],
-    'bakery': ["bakery"],
-    'atm': ["atm"],
-    'attractions': ["night_club", "bar", "movie_theater", "tourist_attraction", "museum", "park"]
-  };
-
-  let categoryGroups: string[][] = [];
-  if (categoryId && categoryTypeMap[categoryId]) {
-    categoryGroups = categoryTypeMap[categoryId].map(type => [type]);
-  } else {
-    categoryGroups = Object.values(categoryTypeMap).slice(0, 3); // Limit to first 3 groups to save quota
-  }
-
-  const fetchGroup = async (includedTypes: string[]) => {
-    const response = await fetch('/api/places/nearby', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        includedTypes,
-        maxResultCount: 15,
-        locationRestriction: {
-          circle: {
-            center: { latitude: center.lat, longitude: center.lng },
-            radius: Math.min(radius, 5000)
-          }
-        }
-      })
-    });
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.places || [];
-  };
-
-  const resultsFromGoogle = await Promise.all(categoryGroups.map(fetchGroup));
-  const processed = await Promise.all(resultsFromGoogle.flat().map(async (p: any) => {
-    const category = mapGoogleTypeToCategory(p.types, p.primaryType);
-    const place: Place = {
-      id: p.id,
-      name: p.displayName?.text || "עסק",
-      lat: p.location.latitude,
-      lng: p.location.longitude,
-      category,
-      address: p.formattedAddress,
-      status: 'maybe',
-      peopleCount: Math.floor(Math.random() * 10),
-      lastUpdate: 'מעודכן כעת',
-      lastUpdateTimestamp: Date.now(),
-      confirmations: 0,
-      officialOpen: true,
-      reportsOpen: 0,
-      reportsClosed: 0
-    };
-    await savePlaceToDB(place);
-    return place;
-  }));
-
-  return processed;
+  return results;
 }
 
 
@@ -613,116 +476,8 @@ async function internalSearchPlaces(queryStr: string, locationBias?: { lat: numb
   // 1. Check DB First (Prefix Search)
   const dbResults = await getSuggestionsFromDB(queryStr);
   
-  // 2. Intelligent API Fallback
-  // Only trigger Google if DB results are fewer than 5 and query is at least 3 chars
-  if (dbResults.length >= 5 || queryStr.length < 3) {
-    return dbResults;
-  }
-
-  // If no results in DB, we proceed to Google API via Backend
-  if (!userId) {
-    logger.warn("User not authenticated, skipping Google API search.");
-    return dbResults;
-  }
-
-  try {
-    const body: any = {
-      userId,
-      query: queryStr,
-      maxResultCount: 10,
-      languageCode: "he"
-    };
-
-    if (locationBias) {
-      body.locationBias = {
-        circle: {
-          center: { latitude: locationBias.lat, longitude: locationBias.lng },
-          radius: 10000
-        }
-      };
-    }
-
-    const response = await fetch('/api/places/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (response.status === 429) {
-      return dbResults;
-    }
-
-    if (!response.ok) return dbResults;
-    const data = await response.json();
-    
-    const googleResults = await Promise.all((data.places || []).map(async (p: any) => {
-      // Check if place exists in DB first to avoid duplicates
-      const docRef = doc(db, 'places', p.id);
-      const docSnap = await getDoc(docRef);
-      
-      if (docSnap.exists()) {
-        return { ...sanitizePlace(docSnap.data()), isLocal: true };
-      }
-
-      const category = mapGoogleTypeToCategory(p.types, p.primaryType);
-      const name = p.displayName?.text || "עסק ללא שם";
-      const isSuspicious = isPlaceSuspicious(name, category);
-      
-      const place: Place = {
-        id: p.id,
-        name,
-        lat: p.location.latitude,
-        lng: p.location.longitude,
-        category,
-        address: p.formattedAddress,
-        place_id: p.id,
-        photo_reference: p.photos?.[0]?.name,
-        status: 'maybe',
-        peopleCount: Math.floor(Math.random() * 20),
-        lastUpdate: 'מעודכן כעת',
-        lastUpdateTimestamp: Date.now(),
-        confirmations: Math.floor(Math.random() * 15),
-        officialOpen: p.regularOpeningHours?.openNow ?? true,
-        photo_url: getPlacePhotoUrl(p.photos?.[0]?.name, category, p.id),
-        openingHours: p.regularOpeningHours?.weekdayDescriptions,
-        openingPeriods: p.regularOpeningHours?.periods,
-        socialPulse: 'active',
-        physicalPresence: 0.8,
-        woltStatus: 'open',
-        easyStatus: 'open',
-        isSuspicious,
-        isLocal: false
-      };
-
-      // Note: We don't upsert here automatically to save on writes for every suggestion.
-      // We'll upsert when the user actually SELECTS the result in the UI.
-      return place;
-    }));
-
-    // Merge results: DB first, then Google (deduplicated)
-    const merged = [...dbResults];
-    googleResults.forEach(gp => {
-      if (!merged.find(dp => dp.id === gp.id)) {
-        merged.push(gp);
-      }
-    });
-
-    const finalResults = merged.filter(p => !isPlaceIncomplete(p));
-    
-    // Update cache
-    searchCache.set(cacheKey, { results: finalResults, timestamp: Date.now() });
-    if (searchCache.size > 50) {
-      const firstKey = searchCache.keys().next().value;
-      if (firstKey) searchCache.delete(firstKey);
-    }
-
-    return finalResults;
-  } catch (error) {
-    logger.error("Error searching places:", error);
-    return dbResults;
-  }
+  // 2. Intelligent API Fallback - REMOVED to prevent external API calls and save quota/DB writes
+  return dbResults;
 }
 
 /**
