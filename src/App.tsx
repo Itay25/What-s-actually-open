@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { Place, Status } from './types';
@@ -221,6 +221,7 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [mapZoom, setMapZoom] = useState(15);
+  const [tempVisiblePlaceId, setTempVisiblePlaceId] = useState<string | null>(null);
   const [showFullHours, setShowFullHours] = useState(false);
   const mapRef = React.useRef<L.Map | null>(null);
   const pendingSearchPlaceId = React.useRef<string | null>(null);
@@ -292,6 +293,36 @@ export default function App() {
 
   const [emergencyData, setEmergencyData] = useState<{ active: boolean; operationName?: string }>({ active: false });
   const [currentTime, setCurrentTime] = useState(Date.now());
+
+  const [dragY, setDragY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const touchStartY = useRef(0);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartY.current = e.touches[0].clientY;
+    setIsDragging(true);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isDragging) return;
+    const deltaY = e.touches[0].clientY - touchStartY.current;
+    setDragY(Math.max(0, deltaY));
+  };
+
+  const handleTouchEnd = () => {
+    if (dragY > 100) {
+      setSelectedPlace(null);
+    }
+    setDragY(0);
+    setIsDragging(false);
+  };
+
+  useEffect(() => {
+    if (!selectedPlace) {
+      setDragY(0);
+      setIsDragging(false);
+    }
+  }, [selectedPlace]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -531,6 +562,18 @@ export default function App() {
 
   useEffect(() => {
     if (selectedPlace) {
+      setTempVisiblePlaceId(selectedPlace.id);
+    } else if (tempVisiblePlaceId) {
+      // Keep it visible for 5 seconds after selection is cleared
+      const timer = setTimeout(() => {
+        setTempVisiblePlaceId(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedPlace?.id, tempVisiblePlaceId]);
+
+  useEffect(() => {
+    if (selectedPlace) {
       setHasReportedThisSession(false);
       setLastViewedPlace(selectedPlace);
     } else if (lastViewedPlace && !hasReportedThisSession && !isPromptShown(lastViewedPlace.id)) {
@@ -745,35 +788,40 @@ export default function App() {
   const [showReportOptions, setShowReportOptions] = useState(false);
 
   const validatedPlaces = React.useMemo(() => {
-    // Combine discovered and pinned places for validation
+    // Combine discovered, pinned, and selected places for validation
     const allPlaces = [...discoveredPlaces];
+    
+    // Ensure selected place is always included
+    if (selectedPlace && !allPlaces.find(p => p.id === selectedPlace.id)) {
+      allPlaces.push(selectedPlace);
+    }
+    
+    // Ensure pinned places are always included
     pinnedPlaces.forEach(p => {
       if (!allPlaces.find(ap => ap.id === p.id)) {
         allPlaces.push(p);
       }
     });
 
-    const places = allPlaces
+    return allPlaces
       .filter(place => !isPlaceIncomplete(place))
       .map(place => {
         const validation = validateBusinessStatus(place);
-      return {
-        ...place,
-        status: mapValidationToStatus(validation.status),
-        reasoning_hebrew: validation.reasoning_hebrew,
-        secondary_message: validation.secondary_message,
-        confidence_score: validation.confidence_score,
-        layers: validation.layers,
-        reportCount: validation.reportCount,
-        reporterPhotos: validation.reporterPhotos,
-        lastUpdateMinutes: validation.lastUpdateMinutes,
-        confidenceLevel: validation.confidenceLevel,
-        isFaded: validation.isFaded
-      };
-    });
-
-    return places;
-  }, [discoveredPlaces, pinnedPlaces, emergencyData.active, currentTime]);
+        return {
+          ...place,
+          status: mapValidationToStatus(validation.status),
+          reasoning_hebrew: validation.reasoning_hebrew,
+          secondary_message: validation.secondary_message,
+          confidence_score: validation.confidence_score,
+          layers: validation.layers,
+          reportCount: validation.reportCount,
+          reporterPhotos: validation.reporterPhotos,
+          lastUpdateMinutes: validation.lastUpdateMinutes,
+          confidenceLevel: validation.confidenceLevel,
+          isFaded: validation.isFaded
+        };
+      });
+  }, [discoveredPlaces, pinnedPlaces, selectedPlace, emergencyData.active, currentTime]);
 
   const distanceToSelectedPlace = selectedPlace 
     ? getDistance(userLocation[0], userLocation[1], selectedPlace.lat, selectedPlace.lng)
@@ -783,17 +831,21 @@ export default function App() {
   const isTooFar = !isAdmin && distanceToSelectedPlace > maxReportingDistance;
 
   const filteredPlaces = React.useMemo(() => {
+    // 1. Filter by category
+    const targetCategoryLabel = activeCategory ? CATEGORIES.find(c => c.id === activeCategory)?.label : null;
+    
     let filtered = activeCategory 
-      ? validatedPlaces.filter(p => p.category === CATEGORIES.find(c => c.id === activeCategory)?.label)
+      ? validatedPlaces.filter(p => p.category === targetCategoryLabel)
       : validatedPlaces;
     
-    // Ensure selected place and pinned places are always in the list even if filtered out
-    const alwaysVisible = new Set([
+    // 2. Ensure selected place and pinned places are always in the list even if filtered out
+    const alwaysVisibleIds = new Set([
       ...(selectedPlace ? [selectedPlace.id] : []),
+      ...(tempVisiblePlaceId ? [tempVisiblePlaceId] : []),
       ...pinnedPlaces.map(p => p.id)
     ]);
 
-    for (const id of alwaysVisible) {
+    for (const id of alwaysVisibleIds) {
       if (!filtered.find(p => p.id === id)) {
         const placeInValidated = validatedPlaces.find(p => p.id === id);
         if (placeInValidated) {
@@ -802,7 +854,7 @@ export default function App() {
       }
     }
     return filtered;
-  }, [validatedPlaces, activeCategory, selectedPlace, pinnedPlaces]);
+  }, [validatedPlaces, activeCategory, selectedPlace, pinnedPlaces, tempVisiblePlaceId]);
 
   const prominenceCache = React.useRef<{ [id: string]: number }>({});
 
@@ -837,104 +889,65 @@ export default function App() {
       prominenceScore: calculateProminenceScore(p)
     })).sort((a, b) => b.prominenceScore - a.prominenceScore);
 
-    // 2. Select prominent businesses for full icons
-    // Density increases with zoom level
-    let baseCount = 12;
-    if (mapZoom >= 14) baseCount = 20;
-    if (mapZoom >= 15) baseCount = 35;
-    if (mapZoom >= 16) baseCount = 50;
-    if (mapZoom >= 17) baseCount = 80;
+    // 2. Spatial Distribution (Anti-Line Effect)
+    // We filter markers that are too close to each other to avoid clustering
+    // Threshold depends on zoom level (approximate meters)
+    const minDistance = mapZoom >= 17 ? 15 : (mapZoom >= 15 ? 30 : 50); 
+    const distributed: any[] = [];
     
-    const topCount = activeCategory ? scoredPlaces.length : baseCount;
-    let prominent = scoredPlaces.slice(0, topCount);
-    let others = scoredPlaces.slice(topCount);
-
-    // Ensure selected place and pinned places are always prominent
-    const alwaysProminentIds = new Set([
+    // Always prioritize selected place and pinned places
+    const priorityIds = new Set([
       ...(selectedPlace ? [selectedPlace.id] : []),
       ...pinnedPlaces.map(p => p.id)
     ]);
 
-    if (alwaysProminentIds.size > 0) {
-      const toPromote: (Place & { prominenceScore: number })[] = [];
-      others = others.filter(p => {
-        if (alwaysProminentIds.has(p.id)) {
-          toPromote.push(p);
-          return false;
-        }
-        return true;
-      });
-      // Put promoted items at the VERY BEGINNING so they get priority in collision detection
-      prominent = [...toPromote, ...prominent];
-    }
+    // Helper to calculate distance in meters (Haversine formula)
+    const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      const R = 6371e3; // metres
+      const φ1 = lat1 * Math.PI/180;
+      const φ2 = lat2 * Math.PI/180;
+      const Δφ = (lat2-lat1) * Math.PI/180;
+      const Δλ = (lon2-lon1) * Math.PI/180;
+      const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ/2) * Math.sin(Δλ/2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    };
 
-    // 3. Spacing/Collision Detection for prominent markers
-    const visibleProminent: (Place & { isDimmed: boolean; showLabel: boolean; labelType: 'none' | 'short' | 'full'; isLabelDimmed: boolean })[] = [];
-    const occupiedIconPositions: { lat: number; lng: number }[] = [];
-    const occupiedLabelPositions: { lat: number; lng: number }[] = [];
-    
-    // Thresholds decrease as we zoom in (allowing more density)
-    const iconThreshold = 0.00035 / Math.pow(2, mapZoom - 15);
-    const labelThresholdLat = 0.0007 / Math.pow(2, mapZoom - 15);
-    const labelThresholdLng = 0.0022 / Math.pow(2, mapZoom - 15);
-
-    for (const place of prominent) {
-      const isAlwaysVisible = alwaysProminentIds.has(place.id);
+    scoredPlaces.forEach(place => {
+      const isPriority = priorityIds.has(place.id);
       
-      const isIconOverlap = occupiedIconPositions.some(pos => 
-        Math.abs(pos.lat - place.lat) < iconThreshold && 
-        Math.abs(pos.lng - place.lng) < iconThreshold
-      );
-
-      // Selected/Pinned places bypass collision detection for visibility, 
-      // but they still contribute to occupied positions
-      if (!isIconOverlap || isAlwaysVisible) {
-        const isLabelOverlap = occupiedLabelPositions.some(pos => 
-          Math.abs(pos.lat - place.lat) < labelThresholdLat && 
-          Math.abs(pos.lng - place.lng) < labelThresholdLng
-        );
-
-        let labelType: 'none' | 'short' | 'full' = 'none';
-        let isLabelDimmed = false;
-        
-        if (!isLabelOverlap || isAlwaysVisible) {
-          if (mapZoom >= 17) labelType = 'full';
-          else if (mapZoom >= 15) labelType = 'short';
-          
-          // If it's forced visible but overlaps, we might dim the label
-          if (isLabelOverlap && isAlwaysVisible) {
-            isLabelDimmed = true;
-          }
-        } else {
-          // If it overlaps, show it dimmed instead of hiding if we're zoomed in enough
-          if (mapZoom >= 17) {
-            labelType = 'short';
-            isLabelDimmed = true;
-          }
-        }
-        
-        visibleProminent.push({ 
-          ...place, 
-          isDimmed: false, 
-          showLabel: labelType !== 'none',
-          labelType,
-          isLabelDimmed
+      if (isPriority) {
+        distributed.push({
+          ...place,
+          isDimmed: false,
+          showLabel: true,
+          labelType: mapZoom >= 17 ? 'full' : 'short',
+          isLabelDimmed: false
         });
-        
-        occupiedIconPositions.push({ lat: place.lat, lng: place.lng });
-        if (labelType !== 'none' && !isLabelDimmed) {
-          occupiedLabelPositions.push({ lat: place.lat, lng: place.lng });
-        }
-      } else {
-        visibleProminent.push({ ...place, isDimmed: true, showLabel: false, labelType: 'none', isLabelDimmed: false });
+        return;
       }
-    }
 
-    // 4. Add others as dimmed dots
-    const dimmedOthers = others.map(p => ({ ...p, isDimmed: true, showLabel: false, labelType: 'none' as const, isLabelDimmed: false }));
+      // Check if too close to any already added place
+      const isTooClose = distributed.some(p => {
+        const dist = getDistance(place.lat, place.lng, p.lat, p.lng);
+        return dist < minDistance;
+      });
 
-    return [...visibleProminent, ...dimmedOthers];
-  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces, activeCategory]);
+      if (!isTooClose) {
+        distributed.push({
+          ...place,
+          isDimmed: false,
+          showLabel: mapZoom >= 15,
+          labelType: mapZoom >= 17 ? 'full' : 'short',
+          isLabelDimmed: false
+        });
+      }
+    });
+
+    return distributed;
+  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces]);
 
   // Handle exit animations by keeping places in state for a short duration
   useEffect(() => {
@@ -1356,13 +1369,19 @@ export default function App() {
         {selectedPlace && (
           <motion.div
             initial={{ x: "100%", opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
+            animate={{ x: 0, opacity: 1, y: dragY }}
             exit={{ x: "100%", opacity: 0 }}
-            transition={{ type: "spring", stiffness: 300, damping: 28, mass: 0.8 }}
+            transition={isDragging ? { duration: 0 } : { type: "spring", stiffness: 300, damping: 28, mass: 0.8 }}
             className="absolute bottom-4 left-4 right-4 top-12 sm:bottom-8 sm:left-8 sm:right-auto sm:top-28 sm:w-[440px] sm:rounded-[32px] z-40 bg-white rounded-[32px] shadow-[0_-10px_40px_rgba(0,0,0,0.1)] sm:shadow-[0_20px_60px_rgba(0,0,0,0.15)] overflow-hidden flex flex-col border-t sm:border border-black/5"
+            style={{ opacity: isDragging ? Math.max(0.7, 1 - dragY / 500) : 1 }}
           >
             {/* Drag Handle (Mobile only) */}
-            <div className="w-full flex justify-center pt-4 pb-2 sm:hidden">
+            <div 
+              className="w-full flex justify-center pt-4 pb-4 sm:hidden cursor-grab active:cursor-grabbing touch-none"
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+            >
               <div className="w-12 h-1.5 bg-black/10 rounded-full" />
             </div>
 
