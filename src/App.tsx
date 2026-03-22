@@ -390,7 +390,16 @@ export default function App() {
 
   // Location request helper
   const requestLocation = useCallback(() => {
-    if ("geolocation" in navigator) {
+    if (isValidLatLng(userLocation[0], userLocation[1])) {
+      setRefreshTrigger(prev => prev + 1);
+      if (mapRef.current) {
+        mapRef.current.flyTo(userLocation, 17, {
+          duration: 2,
+          easeLinearity: 0.25
+        });
+      }
+    } else if ("geolocation" in navigator) {
+      // Fallback if userLocation is somehow invalid
       navigator.geolocation.getCurrentPosition((pos) => {
         const { latitude, longitude } = pos.coords;
         if (isValidLatLng(latitude, longitude)) {
@@ -408,6 +417,50 @@ export default function App() {
         logger.error("Location error:", err);
       });
     }
+  }, [userLocation]);
+
+  // Live Tracking
+  const lastMarkerLocation = useRef<[number, number] | null>(null);
+  useEffect(() => {
+    let watchId: number | null = null;
+
+    if ("geolocation" in navigator) {
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const { latitude, longitude } = pos.coords;
+          if (isValidLatLng(latitude, longitude)) {
+            const newLoc: [number, number] = [latitude, longitude];
+            
+            // Performance: Update marker only if movement > 10m
+            if (lastMarkerLocation.current) {
+              const distance = getDistance(
+                lastMarkerLocation.current[0], 
+                lastMarkerLocation.current[1], 
+                latitude, 
+                longitude
+              );
+              if (distance > 10) {
+                setUserLocation(newLoc);
+                lastMarkerLocation.current = newLoc;
+              }
+            } else {
+              setUserLocation(newLoc);
+              lastMarkerLocation.current = newLoc;
+            }
+          }
+        },
+        (err) => {
+          logger.error("Watch position error:", err);
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+      );
+    }
+
+    return () => {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+    };
   }, []);
 
   // Check for onboarding
