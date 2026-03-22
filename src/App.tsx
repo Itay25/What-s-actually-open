@@ -257,6 +257,7 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [showLocationOnboarding, setShowLocationOnboarding] = useState(false);
+  const [locationPermissionDenied, setLocationPermissionDenied] = useState(false);
   const [showNavigationDialog, setShowNavigationDialog] = useState(false);
   const [wazeIconError, setWazeIconError] = useState(false);
   const [googleMapsIconError, setGoogleMapsIconError] = useState(false);
@@ -2054,27 +2055,94 @@ export default function App() {
                 המיקום משמש רק כדי לוודא שאתה באמת נמצא ליד העסק שאתה מדווח עליו.
               </p>
 
-              <div className="flex flex-col gap-3">
-                <button 
-                  onClick={() => {
-                    localStorage.setItem('location_onboarding_done', 'true');
-                    setShowLocationOnboarding(false);
-                    requestLocation();
-                  }}
-                  className="w-full bg-black text-white py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
-                >
-                  אפשר מיקום
-                </button>
-                <button 
-                  onClick={() => {
-                    localStorage.setItem('location_onboarding_done', 'true');
-                    setShowLocationOnboarding(false);
-                  }}
-                  className="w-full bg-black/5 text-black/40 py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
-                >
-                  לא עכשיו
-                </button>
-              </div>
+              {locationPermissionDenied ? (
+                <div className="flex flex-col gap-4">
+                  <div className="bg-red-50 text-red-600 p-4 rounded-2xl text-sm font-bold">
+                    יש לאפשר גישה למיקום בהגדרות הדפדפן
+                  </div>
+                  <button 
+                    onClick={async () => {
+                      if ("permissions" in navigator) {
+                        try {
+                          const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
+                          if (result.state === "denied") {
+                            // Still denied, maybe user needs to change settings
+                            return;
+                          }
+                        } catch (e) {
+                          console.error("Permission query failed", e);
+                        }
+                      }
+                      setLocationPermissionDenied(false);
+                      requestLocation();
+                      localStorage.setItem('location_onboarding_done', 'true');
+                      setShowLocationOnboarding(false);
+                    }}
+                    className="w-full bg-black text-white py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    נסה שוב
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={async () => {
+                      if ("permissions" in navigator) {
+                        try {
+                          const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
+                          if (result.state === "denied") {
+                            setLocationPermissionDenied(true);
+                            return;
+                          }
+                        } catch (e) {
+                          console.error("Permission query failed", e);
+                        }
+                      }
+                      
+                      // If not denied, try to get location
+                      navigator.geolocation.getCurrentPosition(
+                        (pos) => {
+                          const { latitude, longitude } = pos.coords;
+                          if (isValidLatLng(latitude, longitude)) {
+                            const newLoc: [number, number] = [latitude, longitude];
+                            setUserLocation(newLoc);
+                            setRefreshTrigger(prev => prev + 1);
+                            if (mapRef.current) {
+                              mapRef.current.flyTo(newLoc, 17, {
+                                duration: 2,
+                                easeLinearity: 0.25
+                              });
+                            }
+                          }
+                          localStorage.setItem('location_onboarding_done', 'true');
+                          setShowLocationOnboarding(false);
+                        },
+                        (err) => {
+                          if (err.code === err.PERMISSION_DENIED) {
+                            setLocationPermissionDenied(true);
+                          } else {
+                            // Other errors, just close onboarding
+                            localStorage.setItem('location_onboarding_done', 'true');
+                            setShowLocationOnboarding(false);
+                          }
+                        }
+                      );
+                    }}
+                    className="w-full bg-black text-white py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    אפשר מיקום
+                  </button>
+                  <button 
+                    onClick={() => {
+                      localStorage.setItem('location_onboarding_done', 'true');
+                      setShowLocationOnboarding(false);
+                    }}
+                    className="w-full bg-black/5 text-black/40 py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    לא עכשיו
+                  </button>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
