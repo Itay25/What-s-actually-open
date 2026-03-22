@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search as SearchIcon, X, MapPin, Loader2, History, CheckCircle2, Globe } from 'lucide-react';
+import { Search as SearchIcon, X, MapPin, Loader2, History } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { searchPlaces, upsertPlaceToDB, searchGooglePlaces } from '../services/placesService';
 import { Place } from '../types';
@@ -18,10 +18,8 @@ const MAX_HISTORY = 15;
 export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, userLocation, userId }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Place[]>([]);
-  const [googleResults, setGoogleResults] = useState<Place[]>([]);
   const [history, setHistory] = useState<Place[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [isGoogleSearching, setIsGoogleSearching] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
@@ -52,14 +50,24 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
     const delayDebounceFn = setTimeout(async () => {
       if (query.length > 2) {
         setIsSearching(true);
-        const searchResults = await searchPlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
-        setResults(searchResults);
-        setGoogleResults([]); // Clear google results on new local search
-        setIsSearching(false);
-        setIsOpen(true);
+        try {
+          const searchResults = await searchPlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
+          
+          // If no local results, silently fetch from Google
+          if (searchResults.length === 0 && userId) {
+            const gResults = await searchGooglePlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
+            setResults(gResults);
+          } else {
+            setResults(searchResults);
+          }
+        } catch (error) {
+          console.error("Search failed", error);
+        } finally {
+          setIsSearching(false);
+          setIsOpen(true);
+        }
       } else {
         setResults([]);
-        setGoogleResults([]);
         // Show history if query is empty and input is focused
         if (query.length === 0 && history.length > 0) {
           setIsOpen(true);
@@ -70,7 +78,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
     }, 300);
 
     return () => clearTimeout(delayDebounceFn);
-  }, [query, userLocation, history.length]);
+  }, [query, userLocation, history.length, userId]);
 
   const handleSelect = async (place: Place) => {
     // Add to history
@@ -108,25 +116,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
 
   const filteredHistory = getFilteredHistory(query);
 
-  const hasStrongMatch = results.some(p => 
-    p.name.toLowerCase() === query.toLowerCase() || 
-    p.name.toLowerCase().startsWith(query.toLowerCase())
-  );
-
-  const handleGoogleSearch = async () => {
-    if (!query || !userId) return;
-    setIsGoogleSearching(true);
-    try {
-      const gResults = await searchGooglePlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
-      setGoogleResults(gResults);
-    } catch (error) {
-      console.error("Google search failed", error);
-    } finally {
-      setIsGoogleSearching(false);
-    }
-  };
-
-  const showSuggestions = isOpen && isFocused && (results.length > 0 || googleResults.length > 0 || filteredHistory.length > 0 || isSearching || (query.length > 2));
+  const showSuggestions = isOpen && isFocused && (results.length > 0 || filteredHistory.length > 0 || isSearching || (query.length > 2));
 
   return (
     <div ref={searchRef} className="relative w-full max-w-md mx-auto px-4">
@@ -213,22 +203,10 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
                       >
                         <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center text-gray-500 shrink-0 relative">
                           <MapPin size={20} />
-                          {place.isLocal ? (
-                            <div className="absolute -top-1 -right-1 bg-green-500 text-white rounded-full p-0.5 shadow-sm">
-                              <CheckCircle2 size={10} />
-                            </div>
-                          ) : (
-                            <div className="absolute -top-1 -right-1 bg-blue-500 text-white rounded-full p-0.5 shadow-sm">
-                              <Globe size={10} />
-                            </div>
-                          )}
                         </div>
                         <div className="flex flex-col min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
                             <span className="font-bold text-black truncate">{place.name}</span>
-                            {place.isLocal && (
-                              <span className="text-[9px] font-bold text-green-600 bg-green-50 px-1.5 py-0.5 rounded-md uppercase tracking-wider shrink-0">שמור</span>
-                            )}
                           </div>
                           <span className="text-xs text-gray-500 truncate">{place.address}</span>
                         </div>
@@ -237,48 +215,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
                   </div>
                 )}
 
-                {/* Google Search Results Section */}
-                {googleResults.length > 0 && (
-                  <div className="mt-2 border-t border-black/5 pt-2">
-                    <div className="px-4 py-1 text-[10px] font-bold text-blue-500 uppercase tracking-wider">תוצאות מ-Google</div>
-                    {googleResults.map((place) => (
-                      <button
-                        key={`google-${place.id}`}
-                        onClick={() => handleSelect(place)}
-                        className="w-full px-4 py-3 flex items-center gap-4 hover:bg-black/5 transition-colors text-right"
-                        dir="rtl"
-                      >
-                        <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center text-blue-500 shrink-0 relative">
-                          <Globe size={20} />
-                        </div>
-                        <div className="flex flex-col min-w-0 flex-1">
-                          <span className="font-bold text-black truncate">{place.name}</span>
-                          <span className="text-xs text-gray-500 truncate">{place.address}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* Fallback Search Button */}
-                {query.length > 2 && !isSearching && googleResults.length === 0 && (results.length === 0 || !hasStrongMatch) && (
-                  <div className="p-2">
-                    <button
-                      onClick={handleGoogleSearch}
-                      disabled={isGoogleSearching}
-                      className="w-full px-4 py-4 flex items-center justify-center gap-3 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-2xl transition-all group active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100"
-                    >
-                      {isGoogleSearching ? (
-                        <Loader2 className="animate-spin" size={20} />
-                      ) : (
-                        <Globe size={20} className="group-hover:rotate-12 transition-transform" />
-                      )}
-                      <span className="font-bold text-sm">חפש את "{query}" ב-Google</span>
-                    </button>
-                  </div>
-                )}
-
-                {results.length === 0 && filteredHistory.length === 0 && googleResults.length === 0 && !isSearching && !isGoogleSearching && query.length > 2 && (
+                {results.length === 0 && filteredHistory.length === 0 && !isSearching && query.length > 2 && (
                   <div className="p-8 text-center text-gray-400">
                     <span className="text-sm font-medium">לא נמצאו תוצאות ל-" {query} "</span>
                   </div>
