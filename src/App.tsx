@@ -1229,13 +1229,6 @@ export default function App() {
               מה באמת פתוח?
             </h1>
             <div className="flex items-center gap-2">
-              <div className="hidden md:flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <div className="flex flex-col">
-                  <span className="text-[10px] uppercase tracking-widest opacity-50 font-bold">פעילות בזמן אמת</span>
-                </div>
-              </div>
-              
               {user ? (
                 <div className="flex items-center gap-2 mr-2">
                   <button 
