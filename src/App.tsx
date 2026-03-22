@@ -2108,138 +2108,106 @@ export default function App() {
             <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-white w-full max-w-sm rounded-[40px] overflow-hidden shadow-2xl p-10 text-center"
+              className="bg-white w-full max-w-sm rounded-[32px] overflow-hidden shadow-2xl p-8 text-center"
             >
-              <AnimatePresence mode="wait">
-                {locationPermissionDenied ? (
-                  <motion.div
-                    key="denied"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    className="flex flex-col items-center"
-                  >
-                    <div className="w-20 h-20 bg-red-50 rounded-[32px] flex items-center justify-center text-red-500 mb-8">
-                      <ShieldAlert size={40} strokeWidth={1.5} />
-                    </div>
-                    
-                    <h2 className="text-2xl font-bold mb-4 text-black">גישה למיקום נחסמה</h2>
-                    <p className="text-sm text-black/60 font-medium leading-relaxed mb-10">
-                      יש להפעיל מיקום בהגדרות הדפדפן כדי שנוכל להציג לך את המקומות הקרובים אליך.
-                    </p>
+              <div className="w-16 h-16 bg-blue-50 rounded-3xl flex items-center justify-center text-blue-500 mx-auto mb-6">
+                <MapPin size={32} />
+              </div>
+              
+              <h2 className="text-xl font-bold mb-4">📍 כדי להציג מקומות ודיווחים קרובים אליך</h2>
+              <p className="text-sm text-black/60 font-medium leading-relaxed mb-8">
+                האפליקציה צריכה גישה למיקום שלך.<br/><br/>
+                המיקום משמש רק כדי לוודא שאתה באמת נמצא ליד העסק שאתה מדווח עליו.
+              </p>
 
-                    <div className="flex flex-col gap-3 w-full">
-                      <button 
-                        onClick={async () => {
-                          if ("permissions" in navigator) {
-                            try {
-                              const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
-                              if (result.state === "denied") {
-                                // Still denied, maybe user needs to change settings
-                                return;
-                              }
-                            } catch (e) {
-                              console.error("Permission query failed", e);
+              {locationPermissionDenied ? (
+                <div className="flex flex-col gap-4">
+                  <div className="bg-red-50 text-red-600 p-4 rounded-2xl text-sm font-bold">
+                    יש לאפשר גישה למיקום בהגדרות הדפדפן
+                  </div>
+                  <button 
+                    onClick={async () => {
+                      if ("permissions" in navigator) {
+                        try {
+                          const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
+                          if (result.state === "denied") {
+                            // Still denied, maybe user needs to change settings
+                            return;
+                          }
+                        } catch (e) {
+                          console.error("Permission query failed", e);
+                        }
+                      }
+                      setLocationPermissionDenied(false);
+                      requestLocation();
+                      localStorage.setItem('location_onboarding_done', 'true');
+                      setShowLocationOnboarding(false);
+                    }}
+                    className="w-full bg-black text-white py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    נסה שוב
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={async () => {
+                      if ("permissions" in navigator) {
+                        try {
+                          const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
+                          if (result.state === "denied") {
+                            setLocationPermissionDenied(true);
+                            return;
+                          }
+                        } catch (e) {
+                          console.error("Permission query failed", e);
+                        }
+                      }
+                      
+                      // If not denied, try to get location
+                      navigator.geolocation.getCurrentPosition(
+                        (pos) => {
+                          const { latitude, longitude } = pos.coords;
+                          if (isValidLatLng(latitude, longitude)) {
+                            const newLoc: [number, number] = [latitude, longitude];
+                            setUserLocation(newLoc);
+                            setRefreshTrigger(prev => prev + 1);
+                            if (mapRef.current) {
+                              mapRef.current.flyTo(newLoc, 17, {
+                                duration: 2,
+                                easeLinearity: 0.25
+                              });
                             }
                           }
-                          setLocationPermissionDenied(false);
-                          requestLocation();
                           localStorage.setItem('location_onboarding_done', 'true');
                           setShowLocationOnboarding(false);
-                        }}
-                        className="w-full bg-black text-white py-4.5 rounded-[24px] font-bold text-sm active:scale-95 transition-transform shadow-lg shadow-black/10"
-                      >
-                        נסה שוב
-                      </button>
-                      <button 
-                        onClick={() => {
-                          localStorage.setItem('location_onboarding_done', 'true');
-                          setShowLocationOnboarding(false);
-                        }}
-                        className="w-full bg-black/5 text-black/40 py-4 rounded-[24px] font-bold text-sm active:scale-95 transition-transform"
-                      >
-                        לא עכשיו
-                      </button>
-                    </div>
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key="onboarding"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    className="flex flex-col items-center"
-                  >
-                    <div className="w-20 h-20 bg-blue-50 rounded-[32px] flex items-center justify-center text-blue-500 mb-8">
-                      <MapPin size={40} strokeWidth={1.5} />
-                    </div>
-                    
-                    <h2 className="text-2xl font-bold mb-4 text-black">נשמח להכיר את הסביבה שלך</h2>
-                    <p className="text-sm text-black/60 font-medium leading-relaxed mb-10">
-                      כדי להציג מקומות קרובים אליך, נדרש לאפשר גישה למיקום.
-                    </p>
-
-                    <div className="flex flex-col gap-3 w-full">
-                      <button 
-                        onClick={async () => {
-                          if ("permissions" in navigator) {
-                            try {
-                              const result = await navigator.permissions.query({ name: "geolocation" as PermissionName });
-                              if (result.state === "denied") {
-                                setLocationPermissionDenied(true);
-                                return;
-                              }
-                            } catch (e) {
-                              console.error("Permission query failed", e);
-                            }
+                        },
+                        (err) => {
+                          if (err.code === err.PERMISSION_DENIED) {
+                            setLocationPermissionDenied(true);
+                          } else {
+                            // Other errors, just close onboarding
+                            localStorage.setItem('location_onboarding_done', 'true');
+                            setShowLocationOnboarding(false);
                           }
-                          
-                          // If not denied, try to get location
-                          navigator.geolocation.getCurrentPosition(
-                            (pos) => {
-                              const { latitude, longitude } = pos.coords;
-                              if (isValidLatLng(latitude, longitude)) {
-                                const newLoc: [number, number] = [latitude, longitude];
-                                setUserLocation(newLoc);
-                                setRefreshTrigger(prev => prev + 1);
-                                if (mapRef.current) {
-                                  mapRef.current.flyTo(newLoc, 17, {
-                                    duration: 2,
-                                    easeLinearity: 0.25
-                                  });
-                                }
-                              }
-                              localStorage.setItem('location_onboarding_done', 'true');
-                              setShowLocationOnboarding(false);
-                            },
-                            (err) => {
-                              if (err.code === err.PERMISSION_DENIED) {
-                                setLocationPermissionDenied(true);
-                              } else {
-                                // Other errors, just close onboarding
-                                localStorage.setItem('location_onboarding_done', 'true');
-                                setShowLocationOnboarding(false);
-                              }
-                            }
-                          );
-                        }}
-                        className="w-full bg-black text-white py-4.5 rounded-[24px] font-bold text-sm active:scale-95 transition-transform shadow-lg shadow-black/10"
-                      >
-                        אפשר מיקום
-                      </button>
-                      <button 
-                        onClick={() => {
-                          localStorage.setItem('location_onboarding_done', 'true');
-                          setShowLocationOnboarding(false);
-                        }}
-                        className="w-full bg-black/5 text-black/40 py-4 rounded-[24px] font-bold text-sm active:scale-95 transition-transform"
-                      >
-                        לא עכשיו
-                      </button>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                        }
+                      );
+                    }}
+                    className="w-full bg-black text-white py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    אפשר מיקום
+                  </button>
+                  <button 
+                    onClick={() => {
+                      localStorage.setItem('location_onboarding_done', 'true');
+                      setShowLocationOnboarding(false);
+                    }}
+                    className="w-full bg-black/5 text-black/40 py-4 rounded-[20px] font-bold text-sm active:scale-95 transition-transform"
+                  >
+                    לא עכשיו
+                  </button>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
