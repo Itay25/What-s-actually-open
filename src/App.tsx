@@ -705,21 +705,33 @@ export default function App() {
         timestamp: Date.now()
       });
 
-      // 2. Update place stats in Firestore
-      const placeRef = doc(db, 'places', placeToReport.id);
-      const reportEntry = {
-        status,
-        timestamp: Date.now(),
-        userId: user.uid,
-        userPhoto: user.photoURL || undefined
-      };
-      
-      await updateDoc(placeRef, {
-        [status === 'open' ? 'reportsOpen' : 'reportsClosed']: increment(1),
-        [status === 'open' ? 'lastReportedOpen' : 'lastReportedClosed']: Date.now(),
-        lastReportTime: Date.now(),
-        userReports: arrayUnion(reportEntry)
-      });
+      // 2. Update place stats in Firestore (ONLY if it meets business criteria)
+      const hasPhoto = placeToReport.imageUrl && placeToReport.imageUrl !== 'NO_IMAGE';
+      const hasOpeningHours = placeToReport.openingHours && Array.isArray(placeToReport.openingHours) && placeToReport.openingHours.length > 0;
+      const isBusiness = !!(placeToReport.name && placeToReport.lat && (hasPhoto || hasOpeningHours));
+
+      if (isBusiness) {
+        const placeRef = doc(db, 'places', placeToReport.id);
+        const reportEntry = {
+          status,
+          timestamp: Date.now(),
+          userId: user.uid,
+          userPhoto: user.photoURL || undefined
+        };
+        
+        try {
+          await updateDoc(placeRef, {
+            [status === 'open' ? 'reportsOpen' : 'reportsClosed']: increment(1),
+            [status === 'open' ? 'lastReportedOpen' : 'lastReportedClosed']: Date.now(),
+            lastReportTime: Date.now(),
+            userReports: arrayUnion(reportEntry)
+          });
+        } catch (e) {
+          // If update fails, it might be a new business that wasn't in DB yet
+          // But we only reach here if isBusiness is true
+          logger.debug("Place update failed, skipping aggregated stats update");
+        }
+      }
 
       // 3. Update user stats
       const newReportsCount = (userProfile?.reportsCount || 0) + 1;
