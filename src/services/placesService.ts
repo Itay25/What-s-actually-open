@@ -301,6 +301,20 @@ export async function getPlaceById(id: string): Promise<Place | null> {
  * Helper to save a place to Firestore.
  */
 async function savePlaceToDB(place: Place) {
+  // ONLY save if:
+  // • has name
+  // • has location (lat/lng)
+  // • AND (photo exists OR openingHours exists)
+  const hasName = place.name && place.name !== 'עסק ללא שם';
+  const hasLocation = typeof place.lat === 'number' && typeof place.lng === 'number';
+  const hasPhoto = place.imageUrl && place.imageUrl !== 'NO_IMAGE';
+  const hasOpeningHours = place.openingHours && Array.isArray(place.openingHours) && place.openingHours.length > 0;
+
+  if (!hasName || !hasLocation || !(hasPhoto || hasOpeningHours)) {
+    logger.debug(`Skipping DB save for non-business place: ${place.name} (${place.id})`);
+    return;
+  }
+
   try {
     const placeRef = doc(db, 'places', place.id);
     
