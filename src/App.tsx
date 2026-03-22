@@ -216,6 +216,7 @@ export default function App() {
 
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [userLocation, setUserLocation] = useState<[number, number]>([32.0853, 34.7818]);
+  const [isLoadingLocation, setIsLoadingLocation] = useState(true);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [discoveredPlaces, setDiscoveredPlaces] = useState<Place[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -329,6 +330,44 @@ export default function App() {
       setCurrentTime(Date.now());
     }, 60000); // Update every minute
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const timeout = setTimeout(() => {
+      if (isMounted) {
+        setIsLoadingLocation(false);
+      }
+    }, 2000);
+
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (!isMounted) return;
+          clearTimeout(timeout);
+          const { latitude, longitude } = pos.coords;
+          if (isValidLatLng(latitude, longitude)) {
+            setUserLocation([latitude, longitude]);
+          }
+          setIsLoadingLocation(false);
+        },
+        (err) => {
+          if (!isMounted) return;
+          clearTimeout(timeout);
+          setIsLoadingLocation(false);
+          logger.error("Initial location error:", err);
+        },
+        { timeout: 2000, enableHighAccuracy: true }
+      );
+    } else {
+      clearTimeout(timeout);
+      setIsLoadingLocation(false);
+    }
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timeout);
+    };
   }, []);
 
   // Reset image error when selected place changes
@@ -955,6 +994,17 @@ export default function App() {
   }, [processedPlaces]);
 
   const selectedPlaceData = selectedPlace ? filteredPlaces.find(p => p.id === selectedPlace.id) : null;
+
+  if (isLoadingLocation) {
+    return (
+      <div className="w-full h-screen bg-white flex items-center justify-center" dir="rtl">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin" />
+          <span className="text-sm font-bold text-black/40">מאתר מיקום...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative w-full h-screen overflow-hidden font-sans" dir="rtl">
