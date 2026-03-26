@@ -10,6 +10,10 @@ export interface ValidationResult {
   secondary_message?: string;
   layers: VerificationLayers;
   reportCount?: number;
+  openReportsCount?: number;
+  closedReportsCount?: number;
+  openReporterPhotos?: string[];
+  closedReporterPhotos?: string[];
   reporterPhotos?: string[];
   lastUpdateMinutes?: number;
   confidenceLevel?: 'low' | 'medium' | 'high';
@@ -43,28 +47,30 @@ export function validateBusinessStatus(place: Place): ValidationResult {
 
   // 2. Use the new probabilistic model
   const result = calculateRealOpenStatus(place);
-  const { confidenceScore, uiStatus, uiColor, secondaryMessage } = result;
+  const { confidence, uiStatus, uiColor, secondaryMessage } = result;
 
   // Map statusType to UI status and reasoning
   let status: 'GREEN' | 'RED' | 'GRAY' | 'ORANGE' | 'YELLOWGREEN' = 'GRAY';
   let reasoning = uiStatus;
   let isFaded = false;
 
-  if (uiColor.includes('green')) status = 'GREEN';
-  else if (uiColor.includes('yellow')) status = 'YELLOWGREEN';
-  else if (uiColor.includes('orange')) status = 'ORANGE';
-  else if (uiColor.includes('red')) status = 'RED';
-
-  if (uiColor.includes('/70')) isFaded = true;
+  if (uiColor === 'green') status = 'GREEN';
+  else if (uiColor === 'yellow') status = 'YELLOWGREEN';
+  else if (uiColor === 'orange') status = 'ORANGE';
+  else if (uiColor === 'red') status = 'RED';
 
   return {
     business_id: place.id,
     status,
-    confidence_score: confidenceScore,
+    confidence_score: confidence,
     reasoning_hebrew: reasoning,
     secondary_message: secondaryMessage,
     layers,
     reportCount: result.reportCount,
+    openReportsCount: result.openReportsCount,
+    closedReportsCount: result.closedReportsCount,
+    openReporterPhotos: result.openReporterPhotos,
+    closedReporterPhotos: result.closedReporterPhotos,
     reporterPhotos: result.reporterPhotos,
     lastUpdateMinutes: result.lastUpdateMinutes,
     confidenceLevel: result.confidenceLevel,
