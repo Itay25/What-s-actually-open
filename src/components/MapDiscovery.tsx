@@ -7,7 +7,7 @@ import { Place } from '../types';
 interface MapDiscoveryProps {
   onDiscovery: (places: Place[]) => void;
   onLoading: (loading: boolean) => void;
-  onZoomChange: (zoom: number) => void;
+  onZoomChange?: (zoom: number) => void;
   activeCategory: string | null;
   refreshTrigger?: number;
   userProfile?: any;
@@ -47,6 +47,8 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     const currentLng = center.lng;
     const currentZoom = map.getZoom();
 
+    if (onZoomChange) onZoomChange(currentZoom);
+
     const maxZoom = map.getMaxZoom() === Infinity ? 18 : map.getMaxZoom();
     const minFetchZoom = maxZoom - 6; // Relaxed from -3 to -6 to show more places when zoomed out
     const isHighZoom = currentZoom >= minFetchZoom;
@@ -60,7 +62,7 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     // 2. Movement/Zoom Change detection
     const zoomDiff = Math.abs(currentZoom - lastZoom.current);
     const isZoomingIn = currentZoom > lastZoom.current;
-    const zoomChanged = zoomDiff >= 0.5; // Threshold of 0.5 as requested
+    const zoomChanged = zoomDiff >= 0.5;
     
     const distanceMoved = lastQueryLocation.current 
       ? getDistance(currentLat, currentLng, lastQueryLocation.current.lat, lastQueryLocation.current.lng)
@@ -71,8 +73,12 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     const movedSignificantly = distanceMoved > movementThreshold;
     const categoryChanged = activeCategory !== lastCategory.current;
 
+    // Only trigger fetch on zoom if zooming IN (to restore density)
+    // Zooming OUT should only trigger visual filtering (handled in App.tsx)
+    const shouldFetchOnZoom = zoomChanged && isZoomingIn;
+
     // If nothing changed significantly and not forced, do nothing
-    if (!force && lastQueryLocation.current && !categoryChanged && !zoomChanged && !movedSignificantly) {
+    if (!force && lastQueryLocation.current && !categoryChanged && !shouldFetchOnZoom && !movedSignificantly) {
       return;
     }
 
@@ -124,7 +130,6 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
     lastCategory.current = activeCategory;
 
     lastRequestTime.current = Date.now();
-    onZoomChange(currentZoom);
     
     onLoading(true);
     isRequestInProgress.current = true;
@@ -155,20 +160,12 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
       onLoading(false);
       isRequestInProgress.current = false;
     }
-  }, [map, onDiscovery, onLoading, onZoomChange, activeCategory, userProfile]);
+  }, [map, onDiscovery, onLoading, activeCategory, userProfile]);
 
   const debouncedHandleMove = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(handleMove, 600); // Debounce delay of 600ms (as requested)
   }, [handleMove]);
-
-  const debouncedHandleZoom = useCallback(() => {
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
-      onZoomChange(map.getZoom());
-      handleMove(); // Also trigger move logic on zoom
-    }, 600);
-  }, [map, onZoomChange, handleMove]);
 
   useEffect(() => {
     if (refreshTrigger > lastRefresh.current) {
@@ -182,17 +179,11 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
   }, [activeCategory, handleMove]);
 
   useEffect(() => {
-    onZoomChange(map.getZoom());
-  }, []);
-
-  useEffect(() => {
     map.on('moveend', debouncedHandleMove);
-    map.on('zoomend', debouncedHandleZoom);
     return () => {
       map.off('moveend', debouncedHandleMove);
-      map.off('zoomend', debouncedHandleZoom);
     };
-  }, [map, debouncedHandleMove, debouncedHandleZoom]);
+  }, [map, debouncedHandleMove]);
 
   return null;
 }
