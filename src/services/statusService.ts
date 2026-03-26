@@ -6,10 +6,16 @@ const DAY_INDEX_TO_KEY: (keyof NormalizedOpeningHours)[] = [
 ];
 
 export interface StatusResult {
-  confidenceScore: number;
+  isOpen: boolean;
+  confidence: number; // 0-100
+  source: "hours" | "users" | "mixed";
   uiStatus: string;
   uiColor: string;
   reportCount?: number;
+  openReportsCount?: number;
+  closedReportsCount?: number;
+  openReporterPhotos?: string[];
+  closedReporterPhotos?: string[];
   reporterPhotos?: string[];
   lastUpdateMinutes?: number;
   confidenceLevel?: 'low' | 'medium' | 'high';
@@ -17,10 +23,11 @@ export interface StatusResult {
 }
 
 /**
- * Calculates the real open status based on probabilistic heuristics.
+ * Calculates the real open status based on a weighted consensus algorithm.
+ * This system is designed to be more accurate than Google by prioritizing 
+ * real-time community signals over static official hours.
  */
 export function calculateRealOpenStatus(place: Place, currentTime: Date = new Date()): StatusResult {
-  const currentHour = currentTime.getHours();
   const nowTimestamp = currentTime.getTime();
 
   const parseTimestamp = (ts: any): number | null => {
@@ -32,122 +39,155 @@ export function calculateRealOpenStatus(place: Place, currentTime: Date = new Da
     return null;
   };
 
-  // 1. Get Schedule Status
+  // --- 1. BASELINE: Official Hours ---
   const baseStatus = getBaseOpenStatus(place, currentTime);
   const minutesUntilClose = getMinutesUntilClose(place, currentTime);
   
-  let scheduleStatus: 'OPEN' | 'CLOSING_SOON' | 'CLOSED' = 'CLOSED';
+  let isScheduledOpen = false;
+  let isClosingSoon = false;
+  
   if (baseStatus === 'open' || baseStatus === 'open_24h') {
-    scheduleStatus = minutesUntilClose <= 60 ? 'CLOSING_SOON' : 'OPEN';
+    isScheduledOpen = true;
+    isClosingSoon = minutesUntilClose <= 60;
   } else if (baseStatus === 'closing_soon') {
-    scheduleStatus = 'CLOSING_SOON';
+    isScheduledOpen = true;
+    isClosingSoon = true;
   }
 
-  // 2. Process Community Reports
+  // Baseline score: 70 if open, 30 if closed. 50 if unknown.
+  let score = baseStatus === 'unknown' ? 50 : (isScheduledOpen ? 70 : 30);
+  let source: "hours" | "users" | "mixed" = "hours";
+
+  // --- 2. COMMUNITY SIGNALS: User Reports ---
   const allReports = (place.userReports || []);
-  const validReports = allReports.filter(r => {
+  
+  // Filter reports from the last 3 hours
+  const activeReports = allReports.filter(r => {
     const ts = parseTimestamp(r.timestamp);
     if (!ts) return false;
     const ageMinutes = (nowTimestamp - ts) / (1000 * 60);
-    return ageMinutes >= 5 && ageMinutes <= 120; // 2h window
+    return ageMinutes >= 0 && ageMinutes <= 180; // 3h window
   });
 
-  // Stale reports: older than 90 minutes
-  const freshReports = validReports.filter(r => {
-    const ts = parseTimestamp(r.timestamp);
+  const openReports = activeReports.filter(r => r.status === 'open');
+  const closedReports = activeReports.filter(r => r.status === 'closed');
+  const uniqueUsers = new Set(activeReports.map(r => r.userId)).size;
+
+  // Weighting Logic
+  let reportInfluence = 0;
+  activeReports.forEach(report => {
+    const ts = parseTimestamp(report.timestamp);
     const ageMinutes = (nowTimestamp - (ts || 0)) / (1000 * 60);
-    return ageMinutes <= 90;
+    
+    // Decay function: Fresh reports (<30m) have full weight, older reports decay
+    let weight = 0;
+    if (ageMinutes <= 30) weight = 40;
+    else if (ageMinutes <= 90) weight = 25;
+    else weight = 10;
+
+    // Reliability boost (placeholder for future user-level trust scores)
+    // if (report.userTrust > 0.8) weight *= 1.2;
+
+    if (report.status === 'open') reportInfluence += weight;
+    else reportInfluence -= weight;
   });
 
-  const reportsToUse = freshReports;
-  const openReports = reportsToUse.filter(r => r.status === 'open');
-  const closedReports = reportsToUse.filter(r => r.status === 'closed');
+  // Apply influence to score
+  score += reportInfluence;
+  
+  // Cap the score
+  score = Math.max(0, Math.min(100, score));
 
-  const uniqueUsers = new Set(reportsToUse.map(r => r.userId)).size;
-  const totalCount = reportsToUse.length;
-
-  let communityConfidence: 'low' | 'medium' | 'high' = 'low';
-  if (totalCount >= 3 || (totalCount >= 2 && uniqueUsers >= 2)) {
-    communityConfidence = 'high';
-  } else if (totalCount >= 2) {
-    communityConfidence = 'medium';
-  } else if (totalCount === 1) {
-    communityConfidence = 'low';
+  // Determine Source
+  if (activeReports.length > 0) {
+    const hoursAgree = (isScheduledOpen && reportInfluence > 0) || (!isScheduledOpen && reportInfluence < 0);
+    source = hoursAgree ? "mixed" : "users";
   }
 
-  // Diversity factor: If all reports from same user, reduce confidence
-  if (totalCount >= 2 && uniqueUsers === 1) {
-    if (communityConfidence === 'high') communityConfidence = 'medium';
-    else if (communityConfidence === 'medium') communityConfidence = 'low';
+  // --- 3. CONFLICT & CONFIDENCE ---
+  // If we have conflicting reports, penalize confidence
+  let conflictPenalty = 0;
+  if (openReports.length > 0 && closedReports.length > 0) {
+    conflictPenalty = Math.min(30, Math.abs(openReports.length - closedReports.length) * 5);
   }
 
-  const dominantStatus = openReports.length > closedReports.length ? 'REPORTED_OPEN' : 
-                         closedReports.length > openReports.length ? 'REPORTED_CLOSED' : 
-                         totalCount > 0 ? 'MIXED' : 'UNCONFIRMED';
+  // Confidence is based on the distance from the "uncertainty" center (50)
+  // and boosted by the number of unique reporters.
+  let confidence = Math.abs(score - 50) * 2; 
+  confidence -= conflictPenalty;
+  
+  // Boost confidence for multiple unique users
+  if (uniqueUsers >= 3) confidence += 20;
+  else if (uniqueUsers >= 2) confidence += 10;
 
-  // 3. Combine Logic
+  confidence = Math.max(0, Math.min(100, confidence));
+
+  // --- 4. FINAL STATUS MAPPING ---
+  let isOpen = score > 50;
   let uiStatus = "";
   let uiColor = "";
   let secondaryMessage = "";
 
-  // Default UI based on schedule
-  if (scheduleStatus === 'OPEN') {
-    uiStatus = "פתוח";
-    uiColor = "green";
-  } else if (scheduleStatus === 'CLOSING_SOON') {
-    uiStatus = "נסגר בקרוב";
-    uiColor = "yellow";
-  } else {
+  if (score > 65) {
+    uiStatus = isClosingSoon ? "נסגר בקרוב" : "פתוח";
+    uiColor = isClosingSoon ? "yellow" : "green";
+    if (source === 'users' && !isScheduledOpen) {
+      uiStatus = "פתוח (מחוץ לשעות)";
+      secondaryMessage = "דווח כפתוח על ידי הקהילה";
+    }
+  } else if (score < 35) {
     uiStatus = "סגור";
     uiColor = "red";
-  }
-
-  if (dominantStatus === 'MIXED') {
-    uiStatus = "דיווחים מעורבים";
-    uiColor = "orange"; // Yellow marker
-    secondaryMessage = "משתמשים דיווחו דברים שונים";
-  } else if (dominantStatus === 'REPORTED_OPEN') {
-    if (scheduleStatus === 'CLOSED' && communityConfidence === 'high') {
-      uiStatus = "דווח כפתוח על ידי הקהילה";
-      uiColor = "orange"; // Yellow marker
-    } else if (scheduleStatus === 'CLOSING_SOON') {
-      uiStatus = "נסגר בקרוב";
-      uiColor = "yellow";
-      secondaryMessage = "משתמשים אישרו שהמקום עדיין פתוח";
-    } else if (scheduleStatus === 'OPEN') {
-      uiStatus = "פתוח";
-      uiColor = "green";
-      // Freshness update handled by lastUpdateMinutes
+    if (source === 'users' && isScheduledOpen) {
+      uiStatus = "דווח כסגור";
+      uiColor = "orange";
+      secondaryMessage = "משתמשים דיווחו שהמקום סגור כעת";
     }
-  } else if (dominantStatus === 'REPORTED_CLOSED') {
-    if ((scheduleStatus === 'OPEN' || scheduleStatus === 'CLOSING_SOON') && communityConfidence === 'high') {
-      uiStatus = "דווח כסגור על ידי הקהילה";
-      uiColor = "orange"; // Yellow marker
-    } else if (scheduleStatus === 'CLOSED') {
-      uiStatus = "סגור";
-      uiColor = "red";
-    }
+  } else {
+    uiStatus = "לא ודאי";
+    uiColor = "orange";
+    isOpen = isScheduledOpen; // Fallback to schedule for boolean
+    secondaryMessage = activeReports.length > 0 ? "דיווחים סותרים מהשטח" : "אין מספיק מידע ודאי";
   }
 
   // Metadata for UI
-  const newestReport = reportsToUse.length > 0 
-    ? Math.max(...reportsToUse.map(r => parseTimestamp(r.timestamp) || 0))
+  const newestReport = activeReports.length > 0 
+    ? Math.max(...activeReports.map(r => parseTimestamp(r.timestamp) || 0))
     : null;
   const lastUpdateMinutes = newestReport ? Math.round((nowTimestamp - newestReport) / (1000 * 60)) : undefined;
   
-  const reporterPhotos = reportsToUse
+  const reporterPhotos = activeReports
     .filter(r => r.userPhoto)
     .map(r => r.userPhoto!)
     .slice(0, 3);
 
+  const openReporterPhotos = openReports
+    .filter(r => r.userPhoto)
+    .map(r => r.userPhoto!)
+    .slice(0, 3);
+
+  const closedReporterPhotos = closedReports
+    .filter(r => r.userPhoto)
+    .map(r => r.userPhoto!)
+    .slice(0, 3);
+
+  const confidenceLevel: 'low' | 'medium' | 'high' = 
+    confidence > 80 ? 'high' : confidence > 40 ? 'medium' : 'low';
+
   return {
-    confidenceScore: communityConfidence === 'high' ? 90 : communityConfidence === 'medium' ? 70 : 50,
+    isOpen,
+    confidence,
+    source,
     uiStatus,
     uiColor,
-    reportCount: totalCount,
+    reportCount: activeReports.length,
+    openReportsCount: openReports.length,
+    closedReportsCount: closedReports.length,
+    openReporterPhotos,
+    closedReporterPhotos,
     reporterPhotos,
     lastUpdateMinutes,
-    confidenceLevel: communityConfidence,
+    confidenceLevel,
     secondaryMessage
   };
 }
@@ -353,10 +393,9 @@ function getMinutesUntilClose(place: Place, now: Date): number {
  * Calculates the dynamic status of a place based on its opening hours and current time.
  */
 export function computeOpenStatus(place: Place): 'open' | 'closed' | 'closing_soon' | 'unknown' {
-  const { uiStatus } = calculateRealOpenStatus(place);
+  const { isOpen, uiStatus } = calculateRealOpenStatus(place);
   
-  if (uiStatus === 'פתוח' || uiStatus === 'דווח כפתוח') return 'open';
   if (uiStatus === 'נסגר בקרוב') return 'closing_soon';
   if (uiStatus === 'לא ודאי') return 'unknown';
-  return 'closed';
+  return isOpen ? 'open' : 'closed';
 }
