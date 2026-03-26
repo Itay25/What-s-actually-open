@@ -235,21 +235,48 @@ export default function App() {
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [userReportsTimestamps, setUserReportsTimestamps] = useState<Record<string, number>>(() => {
-    const saved = localStorage.getItem('user_reports_timestamps');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return {};
-      }
-    }
-    return {};
-  });
+  const [userReportsTimestamps, setUserReportsTimestamps] = useState<Record<string, number>>({});
 
   useEffect(() => {
-    localStorage.setItem('user_reports_timestamps', JSON.stringify(userReportsTimestamps));
-  }, [userReportsTimestamps]);
+    if (user) {
+      const saved = localStorage.getItem(`user_reports_timestamps_${user.uid}`);
+      if (saved) {
+        try {
+          setUserReportsTimestamps(JSON.parse(saved));
+        } catch (e) {
+          setUserReportsTimestamps({});
+        }
+      } else {
+        setUserReportsTimestamps({});
+      }
+    } else {
+      setUserReportsTimestamps({});
+    }
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (user && Object.keys(userReportsTimestamps).length > 0) {
+      localStorage.setItem(`user_reports_timestamps_${user.uid}`, JSON.stringify(userReportsTimestamps));
+    }
+  }, [userReportsTimestamps, user?.uid]);
+
+  const isUserInCooldown = useCallback((place: Place | null) => {
+    if (!place || !user) return false;
+    const now = Date.now();
+    const COOLDOWN_MS = 30 * 60 * 1000;
+
+    // Check local state (this device/session)
+    const localLastReportTime = userReportsTimestamps[place.id] || 0;
+    if (now - localLastReportTime < COOLDOWN_MS) return true;
+
+    // Check Firestore data (any device)
+    const dbLastReport = (place.userReports || []).find(r => 
+      r.userId === user.uid && 
+      (now - (typeof r.timestamp === 'number' ? r.timestamp : 0)) < COOLDOWN_MS
+    );
+    
+    return !!dbLastReport;
+  }, [user?.uid, userReportsTimestamps]);
 
   const [showRewards, setShowRewards] = useState(false);
   const [showSources, setShowSources] = useState(false);
@@ -715,11 +742,16 @@ export default function App() {
       return;
     }
 
-    const lastReportTime = userReportsTimestamps[placeToReport.id] || 0;
     const now = Date.now();
     const COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
-    if (now - lastReportTime < COOLDOWN_MS) {
+    if (isUserInCooldown(placeToReport)) {
+      // Find the most recent report time to show accurate minutes left
+      const localTime = userReportsTimestamps[placeToReport.id] || 0;
+      const dbReport = (placeToReport.userReports || []).find(r => r.userId === user.uid);
+      const dbTime = dbReport ? (typeof dbReport.timestamp === 'number' ? dbReport.timestamp : 0) : 0;
+      const lastReportTime = Math.max(localTime, dbTime);
+      
       const minutesLeft = Math.ceil((COOLDOWN_MS - (now - lastReportTime)) / 60000);
       alert(`כבר דיווחת על מקום זה לאחרונה. תוכל לדווח שוב בעוד ${minutesLeft} דקות.`);
       return;
@@ -1819,14 +1851,14 @@ export default function App() {
                         onClick={() => isTooFar ? triggerTooFarTooltip() : handleReport('open')}
                         onMouseEnter={() => isTooFar && setShowTooFarTooltip(true)}
                         onMouseLeave={() => isTooFar && setShowTooFarTooltip(false)}
-                        disabled={isReportingStatus || (!isTooFar && !!userReportsTimestamps[selectedPlace.id] && (Date.now() - userReportsTimestamps[selectedPlace.id] < 30 * 60 * 1000))}
+                        disabled={isReportingStatus || (!isTooFar && isUserInCooldown(selectedPlace))}
                         aria-disabled={isTooFar}
                         title={isTooFar ? "עליך להיות בקרבת המקום כדי לדווח על הסטטוס שלו" : undefined}
                         className={cn(
                           "flex-1 h-14 rounded-[24px] font-bold text-sm transition-all active:scale-[0.98] flex items-center justify-center gap-2 shadow-lg",
                           isTooFar 
                             ? "bg-green-500/50 text-white/70 cursor-not-allowed shadow-none"
-                            : (userReportsTimestamps[selectedPlace.id] && (Date.now() - userReportsTimestamps[selectedPlace.id] < 30 * 60 * 1000)) 
+                            : isUserInCooldown(selectedPlace)
                               ? "bg-gray-100 text-black/20 border border-black/5" 
                               : "bg-green-500 text-white shadow-green-500/20 hover:bg-green-600"
                         )}
@@ -1837,14 +1869,14 @@ export default function App() {
                         onClick={() => isTooFar ? triggerTooFarTooltip() : handleReport('closed')}
                         onMouseEnter={() => isTooFar && setShowTooFarTooltip(true)}
                         onMouseLeave={() => isTooFar && setShowTooFarTooltip(false)}
-                        disabled={isReportingStatus || (!isTooFar && !!userReportsTimestamps[selectedPlace.id] && (Date.now() - userReportsTimestamps[selectedPlace.id] < 30 * 60 * 1000))}
+                        disabled={isReportingStatus || (!isTooFar && isUserInCooldown(selectedPlace))}
                         aria-disabled={isTooFar}
                         title={isTooFar ? "עליך להיות בקרבת המקום כדי לדווח על הסטטוס שלו" : undefined}
                         className={cn(
                           "flex-1 h-14 rounded-[24px] font-bold text-sm transition-all active:scale-[0.98] flex items-center justify-center gap-2 shadow-lg",
                           isTooFar
                             ? "bg-red-500/50 text-white/70 cursor-not-allowed shadow-none"
-                            : (userReportsTimestamps[selectedPlace.id] && (Date.now() - userReportsTimestamps[selectedPlace.id] < 30 * 60 * 1000)) 
+                            : isUserInCooldown(selectedPlace)
                               ? "bg-gray-100 text-black/20 border border-black/5" 
                               : "bg-red-500 text-white shadow-red-500/20 hover:bg-red-600"
                         )}
