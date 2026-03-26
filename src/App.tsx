@@ -952,6 +952,10 @@ export default function App() {
           confidence_score: validation.confidence_score,
           layers: validation.layers,
           reportCount: validation.reportCount,
+          openReportsCount: validation.openReportsCount,
+          closedReportsCount: validation.closedReportsCount,
+          openReporterPhotos: validation.openReporterPhotos,
+          closedReporterPhotos: validation.closedReporterPhotos,
           reporterPhotos: validation.reporterPhotos,
           lastUpdateMinutes: validation.lastUpdateMinutes,
           confidenceLevel: validation.confidenceLevel,
@@ -1666,25 +1670,39 @@ export default function App() {
 
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <div className="flex -space-x-2">
-                            {selectedPlaceData?.reporterPhotos?.map((photo, i) => (
-                              <img 
-                                key={i}
-                                src={photo} 
-                                alt="reporter" 
-                                className="w-6 h-6 rounded-full border-2 border-white shadow-sm object-cover"
-                                referrerPolicy="no-referrer"
-                              />
-                            ))}
-                            {(selectedPlaceData?.reportCount || 0) > 3 && (
-                              <div className="w-6 h-6 rounded-full border-2 border-white bg-gray-100 flex items-center justify-center text-[8px] font-bold text-gray-500 shadow-sm">
-                                +{selectedPlaceData!.reportCount! - 3}
-                              </div>
-                            )}
-                          </div>
-                          <span className="text-[11px] font-medium text-black/60">
-                            {selectedPlaceData?.reportCount === 1 ? 'משתמש אחד אישר' : `${selectedPlaceData?.reportCount} משתמשים אישרו`} שהמקום פתוח
-                          </span>
+                          {(() => {
+                            const openCount = selectedPlaceData?.openReportsCount || 0;
+                            const closedCount = selectedPlaceData?.closedReportsCount || 0;
+                            const isClosedMajority = closedCount > openCount;
+                            const displayCount = isClosedMajority ? closedCount : openCount;
+                            const displayPhotos = isClosedMajority ? selectedPlaceData?.closedReporterPhotos : selectedPlaceData?.openReporterPhotos;
+                            
+                            if (displayCount === 0) return null;
+
+                            return (
+                              <>
+                                <div className="flex -space-x-2">
+                                  {displayPhotos?.map((photo, i) => (
+                                    <img 
+                                      key={i}
+                                      src={photo} 
+                                      alt="reporter" 
+                                      className="w-6 h-6 rounded-full border-2 border-white shadow-sm object-cover"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                  ))}
+                                  {displayCount > 3 && (
+                                    <div className="w-6 h-6 rounded-full border-2 border-white bg-gray-100 flex items-center justify-center text-[8px] font-bold text-gray-500 shadow-sm">
+                                      +{displayCount - 3}
+                                    </div>
+                                  )}
+                                </div>
+                                <span className="text-[11px] font-medium text-black/60">
+                                  {displayCount === 1 ? 'משתמש אחד אישר' : `${displayCount} משתמשים אישרו`} שהמקום {isClosedMajority ? 'סגור' : 'פתוח'}
+                                </span>
+                              </>
+                            );
+                          })()}
                         </div>
                         <div className={cn(
                           "px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-tight",
