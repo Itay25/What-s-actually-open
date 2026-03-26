@@ -1026,30 +1026,34 @@ export default function App() {
       prominenceScore: calculateProminenceScore(p)
     })).sort((a, b) => b.prominenceScore - a.prominenceScore);
 
-    // 2. Spatial Distribution (Anti-Line Effect)
-    // We filter markers that are too close to each other to avoid clustering
-    // Threshold depends on zoom level (approximate meters)
-    const minDistance = mapZoom >= 17 ? 15 : (mapZoom >= 15 ? 30 : 50); 
+    // 2. Spatial Distribution (Anti-Overlap)
+    // We filter markers that are too close to each other in screen space to avoid visual clutter
+    // Threshold depends on zoom level (pixels)
+    const getThreshold = (zoom: number) => {
+      if (zoom >= 18) return 0; // Show all at high zoom
+      if (zoom >= 16) return 25;
+      if (zoom >= 14) return 40;
+      return 50;
+    };
+    const threshold = getThreshold(mapZoom);
     const distributed: any[] = [];
     
-    // Always prioritize selected place and pinned places
+    // Always prioritize selected place, pinned places, and temp visible places
     const priorityIds = new Set([
       ...(selectedPlace ? [selectedPlace.id] : []),
+      ...(tempVisiblePlaceId ? [tempVisiblePlaceId] : []),
       ...pinnedPlaces.map(p => p.id)
     ]);
 
-    // Helper to calculate distance in meters (Haversine formula)
-    const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-      const R = 6371e3; // metres
-      const φ1 = lat1 * Math.PI/180;
-      const φ2 = lat2 * Math.PI/180;
-      const Δφ = (lat2-lat1) * Math.PI/180;
-      const Δλ = (lon2-lon1) * Math.PI/180;
-      const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
-              Math.cos(φ1) * Math.cos(φ2) *
-              Math.sin(Δλ/2) * Math.sin(Δλ/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
+    // Helper to project lat/lng to world pixels at current zoom
+    const worldSize = 256 * Math.pow(2, mapZoom);
+    const project = (lat: number, lng: number) => {
+      const x = (lng + 180) / 360 * worldSize;
+      const sinLat = Math.sin(lat * Math.PI / 180);
+      // Clamp sinLat to avoid log(0) or log(negative)
+      const clampedSinLat = Math.max(-0.9999, Math.min(0.9999, sinLat));
+      const y = (0.5 - Math.log((1 + clampedSinLat) / (1 - clampedSinLat)) / (4 * Math.PI)) * worldSize;
+      return { x, y };
     };
 
     scoredPlaces.forEach(place => {
@@ -1066,10 +1070,15 @@ export default function App() {
         return;
       }
 
-      // Check if too close to any already added place
+      // Project current place to world pixels
+      const p1 = project(place.lat, place.lng);
+
+      // Check if too close to any already added place in screen space
       const isTooClose = distributed.some(p => {
-        const dist = getDistance(place.lat, place.lng, p.lat, p.lng);
-        return dist < minDistance;
+        const p2 = project(p.lat, p.lng);
+        const dx = p1.x - p2.x;
+        const dy = p1.y - p2.y;
+        return (dx * dx + dy * dy) < (threshold * threshold);
       });
 
       if (!isTooClose) {
@@ -1084,7 +1093,7 @@ export default function App() {
     });
 
     return distributed;
-  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces]);
+  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces, tempVisiblePlaceId]);
 
   // Handle exit animations by keeping places in state for a short duration
   useEffect(() => {
