@@ -27,6 +27,177 @@ const inFlightRequests = new Map<string, Promise<Place[]>>();
 const searchCache = new Map<string, { results: Place[], timestamp: number }>();
 const SEARCH_CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes
 
+// Cache for all local places to enable robust in-memory search
+let cachedAllPlaces: Place[] | null = null;
+let lastAllPlacesFetch = 0;
+const ALL_PLACES_CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes in-memory
+const INDEX_CACHE_KEY = 'places_search_index_v2';
+const INDEX_CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours persistent
+
+/**
+ * Normalizes a string by lowercasing, removing punctuation and spaces.
+ */
+function normalize(str: string): string {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .replace(/[.,\-"']/g, '')
+    .replace(/\s+/g, '');
+}
+
+/**
+ * Transliterates Hebrew text to English phonetically for cross-language matching.
+ */
+function transliterateHebrewToEnglish(text: string): string {
+  const brandMap: Record<string, string> = {
+    'אמריקן איגל': 'american eagle',
+    'מקדונלדס': 'mcdonalds',
+    'סופר פארם': 'super pharm',
+    'ארומה': 'aroma',
+    'קופיקס': 'cofix',
+    'קסטרו': 'castro',
+    'פוקס': 'fox',
+    'רנואר': 'renuar',
+    'זארה': 'zara',
+    'נייק': 'nike',
+    'אדידס': 'adidas',
+    'אייץ אנד אם': 'h&m',
+    'ברשקה': 'bershka',
+    'פול אנד בר': 'pull and bear',
+    'סטרדיבריוס': 'stradivarius',
+    'מסימו דוטי': 'massimo dutti',
+    'אופטיקנה': 'opticana',
+    'קרולינה למקה': 'carolina lemke',
+    'סטימצקי': 'steimatzky',
+    'צומת ספרים': 'tzomet sfarim',
+    'שופרסל': 'shufersal',
+    'רמי לוי': 'rami levy',
+    'יוחננוף': 'yohananof',
+    'ויקטורי': 'victory',
+    'מחסני השוק': 'mahsanei hashuk',
+    'יינות ביתן': 'yeinot bitan',
+    'טיב טעם': 'tiv taam',
+    'מגה': 'mega',
+    'אייס': 'ace',
+    'הום סנטר': 'home center',
+    'איקאה': 'ikea',
+    'דלתא': 'delta',
+    'הודיס': 'hoodies',
+    'גולף': 'golf',
+    'פוקס הום': 'fox home',
+    'ללין': 'laline',
+    'סבון': 'sabon',
+    'בודי שופ': 'body shop',
+    'מאק': 'mac',
+    'ספורה': 'sephora',
+    'פוט לוקר': 'foot locker',
+    'דקאתלון': 'decathlon',
+  };
+
+  // Check exact matches first
+  const normalized = text.trim();
+  if (brandMap[normalized]) return brandMap[normalized];
+
+  // Phonetic mapping for characters
+  const charMap: Record<string, string> = {
+    'א': 'a', 'ב': 'b', 'ג': 'g', 'ד': 'd', 'ה': 'h', 'ו': 'v', 'ז': 'z', 'ח': 'h', 'ט': 't', 'י': 'i',
+    'כ': 'k', 'ל': 'l', 'מ': 'm', 'נ': 'n', 'ס': 's', 'ע': 'a', 'פ': 'p', 'צ': 'ts', 'ק': 'k', 'ר': 'r',
+    'ש': 'sh', 'ת': 't', 'ך': 'k', 'ם': 'm', 'ן': 'n', 'ף': 'p', 'ץ': 'ts'
+  };
+
+  return text.split('').map(char => charMap[char] || char).join('');
+}
+
+/**
+ * Simple Levenshtein distance for fuzzy matching.
+ */
+function getLevenshteinDistance(a: string, b: string): number {
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+/**
+ * Fetches all places from Firestore for in-memory search.
+ * Implements a Persistent Local Index to reduce Firestore read costs.
+ */
+async function getAllLocalPlaces(): Promise<Place[]> {
+  // 1. Check in-memory cache
+  if (cachedAllPlaces && Date.now() - lastAllPlacesFetch < ALL_PLACES_CACHE_EXPIRY) {
+    return cachedAllPlaces;
+  }
+
+  // 2. Check localStorage for persistent index
+  try {
+    const cachedData = localStorage.getItem(INDEX_CACHE_KEY);
+    if (cachedData) {
+      const { places, timestamp } = JSON.parse(cachedData);
+      if (Date.now() - timestamp < INDEX_CACHE_EXPIRY) {
+        cachedAllPlaces = places;
+        lastAllPlacesFetch = Date.now();
+        logger.debug(`Loaded search index from localStorage (${places.length} places)`);
+        return places;
+      }
+    }
+  } catch (e) {
+    logger.warn("Error reading search index from localStorage", e);
+  }
+
+  // 3. Fetch from Firestore (Lightweight Index)
+  // Fetch Once: Fetch the places collection ONLY ONCE per app session or every 24 hours.
+  try {
+    logger.info("Fetching full search index from Firestore...");
+    const querySnapshot = await getDocs(collection(db, 'places'));
+    const places: Place[] = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      // Store ONLY essential fields for the search index
+      places.push({
+        id: doc.id,
+        name: data.name || 'עסק ללא שם',
+        address: data.address || '',
+        lat: data.lat,
+        lng: data.lng,
+        category: data.category || 'עסק',
+        isLocal: true,
+        place_id: data.place_id || doc.id
+      } as Place);
+    });
+
+    // Save to localStorage for persistence
+    try {
+      localStorage.setItem(INDEX_CACHE_KEY, JSON.stringify({
+        places,
+        timestamp: Date.now()
+      }));
+    } catch (e) {
+      logger.warn("Error saving search index to localStorage (likely quota exceeded)", e);
+    }
+
+    cachedAllPlaces = places;
+    lastAllPlacesFetch = Date.now();
+    return places;
+  } catch (error) {
+    logger.error("Error fetching all places for search index:", error);
+    return cachedAllPlaces || [];
+  }
+}
+
 /**
  * Helper to extract all possible image URLs from various potential fields.
  * Returns them in priority order.
@@ -337,6 +508,15 @@ async function savePlaceToDB(place: Place) {
 
     // Add optional fields only if they are defined
     if (place.place_id !== undefined) data.place_id = place.place_id;
+    
+    // Rule: Cost Control - Include normalized names for better local matching
+    data.normalized_name_he = normalize(place.name);
+    if (!hasEnglishLetters(place.name)) {
+      data.normalized_name_en = normalize(transliterateHebrewToEnglish(place.name));
+    } else {
+      data.normalized_name_en = normalize(place.name);
+    }
+
     if (place.rating !== undefined) data.rating = place.rating;
     if (place.userRatingsTotal !== undefined) data.userRatingsTotal = place.userRatingsTotal;
     if (place.photo_reference !== undefined) data.photo_reference = place.photo_reference;
@@ -411,88 +591,100 @@ export async function discoverPlaces(bounds: { north: number; south: number; eas
 
 
 /**
- * Helper to get suggestions from DB using prefix search.
- */
-async function getSuggestionsFromDB(searchTerm: string): Promise<Place[]> {
-  const cacheKey = `suggestion-${searchTerm.toLowerCase()}`;
-  
-  // 1. Check cache
-  const cached = searchCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < SEARCH_CACHE_EXPIRY) {
-    return cached.results;
-  }
-
-  // 2. Check in-flight
-  if (inFlightRequests.has(cacheKey)) {
-    return inFlightRequests.get(cacheKey)!;
-  }
-
-  const fetchPromise = (async () => {
-    try {
-      const placesRef = collection(db, 'places');
-      // Prefix search query
-      const q = query(
-        placesRef,
-        where('name', '>=', searchTerm),
-        where('name', '<=', searchTerm + '\uf8ff'),
-        limit(10)
-      );
-      
-      const querySnapshot = await getDocs(q);
-      const places: Place[] = [];
-      querySnapshot.forEach((doc) => {
-        places.push({ ...sanitizePlace(doc.data()), isLocal: true });
-      });
-
-      // Update cache
-      searchCache.set(cacheKey, { results: places, timestamp: Date.now() });
-      return places;
-    } catch (error) {
-      logger.error("Error fetching suggestions from DB:", error);
-      return [];
-    } finally {
-      inFlightRequests.delete(cacheKey);
-    }
-  })();
-
-  inFlightRequests.set(cacheKey, fetchPromise);
-  return fetchPromise;
-}
-
-/**
  * Search for a specific place by text query.
  */
 export async function searchPlaces(queryStr: string, locationBias?: { lat: number; lng: number }, userId?: string): Promise<Place[]> {
   if (!queryStr) return [];
 
-  // 1. Try original query
-  let results = await internalSearchPlaces(queryStr, locationBias, userId);
-
-  // 2. If no results and contains English letters, try Hebrew layout conversion
-  if (results.length === 0 && hasEnglishLetters(queryStr)) {
-    const convertedQuery = convertEnToHeLayout(queryStr);
-    if (convertedQuery !== queryStr) {
-      results = await internalSearchPlaces(convertedQuery, locationBias, userId);
-    }
-  }
-
-  return results;
-}
-
-async function internalSearchPlaces(queryStr: string, locationBias?: { lat: number; lng: number }, userId?: string): Promise<Place[]> {
-  if (!queryStr) return [];
-
-  const cacheKey = `${queryStr.toLowerCase()}-${locationBias ? `${locationBias.lat.toFixed(2)},${locationBias.lng.toFixed(2)}` : 'none'}`;
+  const cacheKey = `search-${queryStr.toLowerCase()}-${locationBias ? `${locationBias.lat.toFixed(2)},${locationBias.lng.toFixed(2)}` : 'none'}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < SEARCH_CACHE_EXPIRY) {
     return cached.results;
   }
 
-  // 1. Check DB First (Prefix Search)
-  const dbResults = await getSuggestionsFromDB(queryStr);
-  
-  // 2. Intelligent API Fallback - REMOVED to prevent external API calls and save quota/DB writes
-  return dbResults;
+  // 1. Normalize query
+  const normalizedQuery = normalize(queryStr);
+  const queryWords = queryStr.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+  const normalizedQueryWords = queryWords.map(w => normalize(w)).filter(w => w.length > 0);
+
+  if (normalizedQueryWords.length === 0) return [];
+
+  // 2. Get all local places
+  const allPlaces = await getAllLocalPlaces();
+
+  // 3. Basic Matching (Core Logic)
+  let results = allPlaces.filter(place => {
+    // Rule 1: FULL CONTEXT LOCAL MATCH
+    // Combine name + address (since city is usually in address)
+    // Use stored normalized names if available for better performance and accuracy
+    const nameToSearch = (place as any).normalized_name_he || place.name;
+    const enNameToSearch = (place as any).normalized_name_en || '';
+    const addressToSearch = place.address || '';
+    
+    const tempSearchString = normalize(nameToSearch + addressToSearch);
+    const tempEnSearchString = normalize(enNameToSearch + addressToSearch);
+    
+    // Rule 1: STRICT AND-LOGIC
+    // EVERY WORD in the query must exist as a substring within the combined search target
+    return normalizedQueryWords.every(word => 
+      tempSearchString.includes(word) || tempEnSearchString.includes(word)
+    );
+  });
+
+  // 4. Fuzzy Match (Only if no results)
+  if (results.length === 0 && queryStr.length > 2) {
+    results = allPlaces.filter(place => {
+      const nameLower = place.name.toLowerCase();
+      // Allow small typo (1-2 characters)
+      // We check if any word in the name is similar to the query or vice versa
+      const distance = getLevenshteinDistance(normalize(place.name), normalizedQuery);
+      
+      // Threshold: 1 for short queries, 2 for longer ones
+      const threshold = normalizedQuery.length > 5 ? 2 : 1;
+      return distance <= threshold;
+    });
+  }
+
+  // 5. Cross-Language Transliteration (Fixes "American Eagle" vs "אמריקן איגל")
+  if (results.length === 0 && !hasEnglishLetters(queryStr)) {
+    const transliteratedQuery = transliterateHebrewToEnglish(queryStr);
+    const normalizedTransliterated = normalize(transliteratedQuery);
+    
+    results = allPlaces.filter(place => {
+      const tempSearchString = normalize(place.name + (place.address || ''));
+      // Check if transliterated query matches the English name in DB
+      return tempSearchString.includes(normalizedTransliterated);
+    });
+  }
+
+  // 6. Keyboard Layout Fallback (Existing behavior)
+  if (results.length === 0 && hasEnglishLetters(queryStr)) {
+    const convertedQuery = convertEnToHeLayout(queryStr);
+    if (convertedQuery !== queryStr) {
+      return searchPlaces(convertedQuery, locationBias, userId);
+    }
+  }
+
+  // Sort results by relevance and distance
+  results.sort((a, b) => {
+    // Exact name match priority
+    const aExact = a.name.toLowerCase() === queryStr.toLowerCase();
+    const bExact = b.name.toLowerCase() === queryStr.toLowerCase();
+    if (aExact && !bExact) return -1;
+    if (!aExact && bExact) return 1;
+
+    // Distance priority if bias exists
+    if (locationBias) {
+      const distA = Math.pow(a.lat - locationBias.lat, 2) + Math.pow(a.lng - locationBias.lng, 2);
+      const distB = Math.pow(b.lat - locationBias.lat, 2) + Math.pow(b.lng - locationBias.lng, 2);
+      return distA - distB;
+    }
+    return 0;
+  });
+
+  const finalResults = results.slice(0, 10);
+  searchCache.set(cacheKey, { results: finalResults, timestamp: Date.now() });
+  return finalResults;
 }
 
 /**
@@ -548,6 +740,15 @@ export async function searchGooglePlaces(queryStr: string, locationBias?: { lat:
         isLocal: false
       };
 
+      // Rule 3: NO DUPLICATES
+      // If the API returns a place that somehow already exists in the local DB, merge them
+      if (cachedAllPlaces) {
+        const localMatch = cachedAllPlaces.find(lp => lp.id === p.id || lp.place_id === p.id);
+        if (localMatch) {
+          return { ...localMatch, isLocal: true };
+        }
+      }
+
       // Add opening hours if available
       if (p.regularOpeningHours) {
         place.openingHours = p.regularOpeningHours.weekdayDescriptions;
@@ -557,7 +758,7 @@ export async function searchGooglePlaces(queryStr: string, locationBias?: { lat:
       // Add image if available
       if (p.photos && p.photos.length > 0) {
         place.imageUrl = getPlacePhotoUrl(p.photos[0].name, place.category, place.id);
-        place.potentialImages = p.photos.map((photo: any) => getPlacePhotoUrl(photo.name, place.category, place.id));
+        place.potentialImages = p.photos.map((photo: any) => getPlacePhotoUrl(photo.name, place.category, photo.id || place.id));
       }
 
       return place;
