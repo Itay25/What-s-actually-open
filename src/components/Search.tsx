@@ -163,7 +163,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
 
   const filteredHistory = getFilteredHistory(query);
 
-  const showSuggestions = isOpen && isFocused && (results.length > 0 || filteredHistory.length > 0 || isSearching || (query.length > 2));
+  const showSuggestions = isOpen && (results.length > 0 || filteredHistory.length > 0 || isSearching || (query.length > 2));
 
   return (
     <div ref={searchRef} className="relative w-full max-w-md mx-auto px-4">
@@ -181,8 +181,8 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
             onFocus?.();
           }}
           onBlur={() => {
-            // Delay blur to allow clicking suggestions
-            setTimeout(() => setIsFocused(false), 200);
+            // Do NOT hide results on blur (mobile keyboard dismissal)
+            setIsFocused(false);
           }}
           placeholder="חפש עסק, כתובת או קטגוריה..."
           className="w-full h-12 pl-12 pr-12 bg-white/80 backdrop-blur-2xl border border-black/[0.08] rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.08)] outline-none focus:ring-4 focus:ring-black/5 focus:border-black/10 transition-all text-right font-medium placeholder:text-gray-400"
@@ -190,7 +190,10 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
         />
         {query && (
           <button
-            onClick={() => setQuery('')}
+            onClick={() => {
+              setQuery('');
+              setIsOpen(false);
+            }}
             className="absolute inset-y-0 right-4 flex items-center text-gray-400 hover:text-black transition-colors"
           >
             <X size={20} />
