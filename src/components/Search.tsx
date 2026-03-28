@@ -55,7 +55,6 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
   useEffect(() => {
     if (query.length <= 2) {
       setResults([]);
-      setIsOpen(query.length === 0 && history.length > 0);
       return;
     }
 
@@ -176,12 +175,13 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => { 
-            setIsOpen(true); 
             setIsFocused(true);
+            setIsOpen(true); 
             onFocus?.();
           }}
           onBlur={() => {
             // Do NOT hide results on blur (mobile keyboard dismissal)
+            // but we track focus state for logic
             setIsFocused(false);
           }}
           placeholder="חפש עסק, כתובת או קטגוריה..."
