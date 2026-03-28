@@ -587,10 +587,24 @@ export default function App() {
       });
 
       // Wait for animation to finish before opening info sheet
-      const onMoveEnd = () => {
+      const onMoveEnd = async () => {
         // Only open if this is still the pending selection
         if (pendingSearchPlaceId.current === place.id) {
-          setSelectedPlace(place);
+          // Fetch full details for local places since the search index is lightweight
+          // This implements the "Single Read on Selection" rule to save costs
+          let fullPlace = place;
+          if (place.isLocal) {
+            try {
+              const fetched = await getPlaceById(place.id);
+              if (fetched) {
+                fullPlace = { ...fetched, isLocal: true };
+              }
+            } catch (error) {
+              logger.error("Error fetching full place details on selection:", error);
+            }
+          }
+          
+          setSelectedPlace(fullPlace);
           setImageError(false); // Reset image error
         }
         mapRef.current?.off('moveend', onMoveEnd);
