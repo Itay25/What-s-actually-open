@@ -20,6 +20,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
   const [results, setResults] = useState<Place[]>([]);
   const [history, setHistory] = useState<Place[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isApiSearching, setIsApiSearching] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
@@ -46,39 +47,85 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  const resultsRef = useRef<Place[]>([]);
   useEffect(() => {
-    const delayDebounceFn = setTimeout(async () => {
-      if (query.length > 2) {
-        setIsSearching(true);
-        try {
-          const searchResults = await searchPlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
-          
-          // If no local results, silently fetch from Google
-          if (searchResults.length === 0 && userId) {
-            const gResults = await searchGooglePlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
-            setResults(gResults);
-          } else {
-            setResults(searchResults);
-          }
-        } catch (error) {
-          console.error("Search failed", error);
-        } finally {
-          setIsSearching(false);
-          setIsOpen(true);
-        }
-      } else {
-        setResults([]);
-        // Show history if query is empty and input is focused
-        if (query.length === 0 && history.length > 0) {
-          setIsOpen(true);
-        } else {
-          setIsOpen(false);
-        }
+    resultsRef.current = results;
+  }, [results]);
+
+  useEffect(() => {
+    if (query.length <= 2) {
+      setResults([]);
+      setIsOpen(query.length === 0 && history.length > 0);
+      return;
+    }
+
+    // Local search after 300ms
+    const localTimer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const localResults = await searchPlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
+        setResults(localResults);
+      } catch (error) {
+        console.error("Local search failed", error);
+      } finally {
+        setIsSearching(false);
+        setIsOpen(true);
       }
     }, 300);
 
-    return () => clearTimeout(delayDebounceFn);
-  }, [query, userLocation, history.length, userId]);
+    // Rule 2: SMART API FALLBACK WITH "DECISION WINDOW" (Zero-Waste Update)
+    // Trigger the API call ONLY IF: 3 seconds have passed since the last keystroke
+    const apiTimer = setTimeout(async () => {
+      if (!userId) return;
+
+      const currentResults = resultsRef.current;
+      const normalizedQuery = query.toLowerCase().trim();
+      const queryWords = normalizedQuery.split(/\s+/).filter(w => w.length > 0);
+      
+      // Check if we have "Good Enough" local results
+      // 1. We have results
+      // 2. AND at least one result starts with the query string
+      const hasGoodLocalMatch = currentResults.length > 0 && currentResults.some(p => 
+        p.name.toLowerCase().startsWith(normalizedQuery) || 
+        p.name.toLowerCase().includes(normalizedQuery)
+      );
+
+      // Rule: Only trigger API if:
+      // - Zero local results
+      // - OR: Long query (4+ words) AND no perfect match found yet
+      const isLongQuery = queryWords.length >= 4;
+      const shouldTriggerApi = currentResults.length === 0 || (isLongQuery && !hasGoodLocalMatch);
+
+      if (shouldTriggerApi) {
+        setIsApiSearching(true);
+        try {
+          const gResults = await searchGooglePlaces(query, { lat: userLocation[0], lng: userLocation[1] }, userId);
+          
+          // Rule 3: NO DUPLICATES (Merge with current results)
+          setResults(prev => {
+            const seen = new Set(prev.map(p => p.id));
+            const newResults = [...prev];
+            gResults.forEach(p => {
+              if (!seen.has(p.id)) {
+                newResults.push(p);
+                seen.add(p.id);
+              }
+            });
+            return newResults;
+          });
+        } catch (err) {
+          console.error("Google search failed", err);
+        } finally {
+          setIsApiSearching(false);
+        }
+      }
+    }, 3000);
+
+    return () => {
+      clearTimeout(localTimer);
+      clearTimeout(apiTimer);
+    };
+  }, [query, userLocation, userId]);
 
   const handleSelect = async (place: Place) => {
     // Add to history
@@ -160,10 +207,12 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
             transition={{ type: "spring", stiffness: 400, damping: 30 }}
             className="absolute top-full left-4 right-4 mt-3 bg-white/90 backdrop-blur-3xl border border-black/[0.08] rounded-[24px] shadow-[0_20px_60px_rgba(0,0,0,0.15)] overflow-hidden z-50"
           >
-            {isSearching ? (
+            {isSearching || isApiSearching ? (
               <div className="p-8 flex flex-col items-center justify-center gap-3 text-gray-400">
                 <Loader2 className="animate-spin" size={24} />
-                <span className="text-sm font-medium">מחפש תוצאות...</span>
+                <span className="text-sm font-medium">
+                  {isApiSearching ? "מרחיב חיפוש לעסקים נוספים..." : "מחפש תוצאות..."}
+                </span>
               </div>
             ) : (
               <div className="max-h-[60vh] overflow-y-auto py-2">
