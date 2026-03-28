@@ -67,21 +67,16 @@ const getCategoryIcon = (category: string) => {
   return <MapPin size={18} strokeWidth={2.5} />;
 };
 
-function ChangeView({ center }: { center: [number, number] }) {
-  const map = useMap();
-  useEffect(() => {
-    map.setView(center, 15);
-  }, [center, map]);
-  return null;
-}
-
-function MapEvents({ onMapClick }: { onMapClick: () => void }) {
+function MapEvents({ onMapClick, onMoveEnd }: { onMapClick: () => void, onMoveEnd?: () => void }) {
   useMapEvents({
     click: () => {
       onMapClick();
     },
     dragstart: () => {
       onMapClick();
+    },
+    moveend: () => {
+      if (onMoveEnd) onMoveEnd();
     }
   });
   return null;
@@ -224,6 +219,7 @@ export default function App() {
   const [mapZoom, setMapZoom] = useState(15);
   const [tempVisiblePlaceId, setTempVisiblePlaceId] = useState<string | null>(null);
   const [showFullHours, setShowFullHours] = useState(false);
+  const [isMapAnimating, setIsMapAnimating] = useState(false);
   const mapRef = React.useRef<L.Map | null>(null);
   const pendingSearchPlaceId = React.useRef<string | null>(null);
 
@@ -417,9 +413,24 @@ export default function App() {
 
   // Location request helper
   const requestLocation = useCallback(() => {
+    if (isMapAnimating) return;
+
     if (isValidLatLng(userLocation[0], userLocation[1])) {
-      setRefreshTrigger(prev => prev + 1);
       if (mapRef.current) {
+        const currentCenter = mapRef.current.getCenter();
+        const currentZoom = mapRef.current.getZoom();
+        
+        const latDiff = Math.abs(currentCenter.lat - userLocation[0]);
+        const lngDiff = Math.abs(currentCenter.lng - userLocation[1]);
+        
+        // Distance check: 0.0001 degrees threshold (~11 meters)
+        if (latDiff < 0.0001 && lngDiff < 0.0001 && currentZoom === 17) {
+          setRefreshTrigger(prev => prev + 1);
+          return;
+        }
+
+        setIsMapAnimating(true);
+        setRefreshTrigger(prev => prev + 1);
         mapRef.current.flyTo(userLocation, 17, {
           duration: 2,
           easeLinearity: 0.25
@@ -432,8 +443,9 @@ export default function App() {
         if (isValidLatLng(latitude, longitude)) {
           const newLoc: [number, number] = [latitude, longitude];
           setUserLocation(newLoc);
-          setRefreshTrigger(prev => prev + 1);
           if (mapRef.current) {
+            setIsMapAnimating(true);
+            setRefreshTrigger(prev => prev + 1);
             mapRef.current.flyTo(newLoc, 17, {
               duration: 2,
               easeLinearity: 0.25
@@ -444,7 +456,7 @@ export default function App() {
         logger.error("Location error:", err);
       });
     }
-  }, [userLocation]);
+  }, [userLocation, isMapAnimating]);
 
   // Live Tracking
   const lastMarkerLocation = useRef<[number, number] | null>(null);
@@ -580,6 +592,7 @@ export default function App() {
     });
 
     if (mapRef.current) {
+      setIsMapAnimating(true);
       // First, animate smoothly
       mapRef.current.flyTo([place.lat, place.lng], 17, {
         duration: 2, // Slower for better context
@@ -1141,11 +1154,14 @@ export default function App() {
         className="w-full h-full z-0"
         ref={mapRef}
       >
-        <MapEvents onMapClick={() => {
-          if (window.innerWidth < 768) {
-            setIsFilterOpen(false);
-          }
-        }} />
+        <MapEvents 
+          onMapClick={() => {
+            if (window.innerWidth < 768) {
+              setIsFilterOpen(false);
+            }
+          }} 
+          onMoveEnd={() => setIsMapAnimating(false)}
+        />
         <TileLayer
           url={isDarkMode && userProfile?.activeRewards?.includes('theme-dark')
             ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
@@ -2246,6 +2262,7 @@ export default function App() {
                             setUserLocation(newLoc);
                             setRefreshTrigger(prev => prev + 1);
                             if (mapRef.current) {
+                              setIsMapAnimating(true);
                               mapRef.current.flyTo(newLoc, 17, {
                                 duration: 2,
                                 easeLinearity: 0.25
@@ -2383,9 +2400,10 @@ export default function App() {
       <div className="absolute bottom-4 left-4 md:bottom-10 md:left-6 z-10 flex flex-col gap-4">
         <button 
           onClick={requestLocation}
-          className="w-12 h-12 md:w-14 md:h-14 bg-white rounded-2xl shadow-xl flex items-center justify-center text-black active:scale-90 transition-transform border border-black/5"
+          disabled={isMapAnimating}
+          className={`w-12 h-12 md:w-14 md:h-14 bg-white rounded-2xl shadow-xl flex items-center justify-center text-black active:scale-90 transition-transform border border-black/5 ${isMapAnimating ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
-          <Navigation size={20} className="md:w-6 md:h-6" />
+          <Navigation size={20} className={`md:w-6 md:h-6 ${isMapAnimating ? 'animate-pulse' : ''}`} />
         </button>
       </div>
 
