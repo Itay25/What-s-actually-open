@@ -222,6 +222,7 @@ export default function App() {
   const [isMapAnimating, setIsMapAnimating] = useState(false);
   const mapRef = React.useRef<L.Map | null>(null);
   const pendingSearchPlaceId = React.useRef<string | null>(null);
+  const isNavigating = React.useRef(false);
 
   // We keep track of places that should be visible to handle exit animations
   const [visiblePlaces, setVisiblePlaces] = useState<Place[]>([]);
@@ -570,10 +571,11 @@ export default function App() {
 
   const handleDiscovery = useCallback((newPlaces: Place[]) => {
     setDiscoveredPlaces(prev => {
-      const combined = [...prev, ...newPlaces];
-      // Deduplicate by ID
-      const unique = combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-      return unique;
+      const filteredNewPlaces = newPlaces.filter(np => !prev.some(p => p.id === np.id));
+      if (filteredNewPlaces.length === 0) return prev;
+      
+      const combined = [...prev, ...filteredNewPlaces];
+      return combined;
     });
   }, []);
 
@@ -593,6 +595,7 @@ export default function App() {
 
     if (mapRef.current) {
       setIsMapAnimating(true);
+      isNavigating.current = true;
       // First, animate smoothly
       mapRef.current.flyTo([place.lat, place.lng], 17, {
         duration: 2, // Slower for better context
@@ -601,6 +604,7 @@ export default function App() {
 
       // Wait for animation to finish before opening info sheet
       const onMoveEnd = async () => {
+        isNavigating.current = false;
         // Only open if this is still the pending selection
         if (pendingSearchPlaceId.current === place.id) {
           // Fetch full details for local places since the search index is lightweight
@@ -1177,6 +1181,7 @@ export default function App() {
           activeCategory={activeCategory} 
           refreshTrigger={refreshTrigger}
           userProfile={userProfile}
+          isNavigating={isNavigating}
         />
 
         {visiblePlaces.map((place: any) => (
