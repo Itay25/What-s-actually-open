@@ -355,11 +355,11 @@ async function getPlacesFromDB(bounds: { north: number; south: number; east: num
       const placesRef = collection(db, 'places');
       
       // Determine limit based on zoom level
-      let maxResults = 50;
-      if (zoom >= 17) maxResults = 50;
-      else if (zoom >= 15) maxResults = 35;
-      else if (zoom >= 13) maxResults = 20;
-      else maxResults = 10;
+      let maxResults = 80; // Optimized: Capped at 80 as requested (reduced from 300)
+      if (zoom >= 17) maxResults = 80;
+      else if (zoom >= 15) maxResults = 60;
+      else if (zoom >= 13) maxResults = 40;
+      else maxResults = 20;
 
       // Viewport-only query: Filter by latitude AND longitude range in DB
       // Note: This requires a composite index on (lat, lng)
