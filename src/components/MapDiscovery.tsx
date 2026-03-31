@@ -11,6 +11,7 @@ interface MapDiscoveryProps {
   activeCategory: string | null;
   refreshTrigger?: number;
   userProfile?: any;
+  isNavigating?: React.RefObject<boolean>;
 }
 
 const getDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => {
@@ -26,7 +27,7 @@ const getDistance = (lat1: number, lng1: number, lat2: number, lng2: number) => 
   return R * c;
 };
 
-export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCategory, refreshTrigger = 0, userProfile }: MapDiscoveryProps) {
+export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCategory, refreshTrigger = 0, userProfile, isNavigating }: MapDiscoveryProps) {
   const map = useMap();
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
   const lastQueryLocation = useRef<{lat: number, lng: number} | null>(null);
@@ -37,8 +38,15 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
   const dataCache = useRef<Map<string, { places: Place[], loadedAt: number }>>(new Map());
   
   const lastRequestTime = useRef<number>(0);
+  const userProfileUidRef = useRef<string | undefined>(userProfile?.uid);
+
+  useEffect(() => {
+    userProfileUidRef.current = userProfile?.uid;
+  }, [userProfile?.uid]);
   
   const handleMove = useCallback(async (force: boolean = false) => {
+    if (isNavigating?.current) return;
+    
     const bounds = map.getBounds();
     if (!bounds.isValid()) return;
 
@@ -141,7 +149,7 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
         south,
         east,
         west
-      }, activeCategory, userProfile?.uid, currentZoom);
+      }, activeCategory, userProfileUidRef.current, currentZoom);
       
       // Update cache
       dataCache.current.set(cacheKey, { places: discovered, loadedAt: Date.now() });
@@ -160,7 +168,7 @@ export function MapDiscovery({ onDiscovery, onLoading, onZoomChange, activeCateg
       onLoading(false);
       isRequestInProgress.current = false;
     }
-  }, [map, onDiscovery, onLoading, activeCategory, userProfile]);
+  }, [map, onDiscovery, onLoading, activeCategory]);
 
   const debouncedHandleMove = useCallback(() => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
