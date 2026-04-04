@@ -5,10 +5,12 @@ import { fileURLToPath } from "url";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import axios from "axios";
+import OpenAI from "openai";
 import "dotenv/config";
 import logger from "./src/utils/logger";
+import { LiveCheckResult } from "./src/types";
 import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
-import fs from "fs";
+import fs from "fs"; // הוחזר מהקובץ המקורי עבור קריאת הקובץ הלוקאלי
 
 // Lazy initialization for Firebase Admin
 let dbInstance: admin.firestore.Firestore | null = null;
@@ -22,7 +24,7 @@ function getDb() {
 
         let credential;
 
-        // בדיקה: האם אנחנו ב-Render? (משתמשים במשתנה סביבה)
+        // בדיקה: האם אנחנו ב-Render? (משתמשים במשתנה סביבה) - הוחזר מהקובץ המקורי
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
           logger.info("Loading credentials from Environment Variable (Render Mode)");
           const serviceAccountValue = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -41,6 +43,7 @@ function getDb() {
         adminApp = admin.apps[0]!;
       }
 
+      logger.debug("SERVER PROJECT ID:", adminApp.options.projectId);
       dbInstance = getFirestore(adminApp);
       logger.info("Firestore connected successfully.");
     } catch (error: any) {
@@ -129,12 +132,104 @@ async function startServer() {
   const MAX_GOOGLE_CALLS_PER_DAY = 200;
 
   const inFlightRequests = new Map<string, Promise<any>>();
+  const usageCache = new Map<string, { allowed: boolean; error?: string; timestamp: number }>();
+  const USAGE_CACHE_TTL = 60000; // 60 seconds
+
+  const perplexityClient = new OpenAI({
+    apiKey: process.env.PERPLEXITY_API_KEY,
+    baseURL: "https://api.perplexity.ai",
+  });
+
+  const openaiClient = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+
+  const liveCheckCache = new Map<string, { data: any; timestamp: number }>();
+  const LIVE_CHECK_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+  function calculateBaseStatus(openingHours: string[] | undefined, now: Date): "OPEN" | "CLOSED" | "CLOSING_SOON" | "UNCERTAIN" {
+    if (!openingHours || !Array.isArray(openingHours) || openingHours.length === 0) {
+      return "UNCERTAIN";
+    }
+
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const dayNamesHebrew = ["יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "יום שבת"];
+    
+    const currentDayIndex = now.getDay();
+    const currentDayName = dayNames[currentDayIndex];
+    const currentDayNameHebrew = dayNamesHebrew[currentDayIndex];
+
+    const todayLine = openingHours.find(line => 
+      typeof line === 'string' && (
+        line.toLowerCase().includes(currentDayName.toLowerCase()) || 
+        line.includes(currentDayNameHebrew)
+      )
+    );
+
+    if (!todayLine) return "UNCERTAIN";
+    if (todayLine.includes("Closed") || todayLine.includes("סגור")) return "CLOSED";
+    if (todayLine.includes("Open 24 hours") || todayLine.includes("פתוח 24 שעות")) return "OPEN";
+
+    const timeRangeRegex = /(\d{1,2}:\d{2})\s*(AM|PM)?\s*[–-]\s*(\d{1,2}:\d{2})\s*(AM|PM)?/gi;
+    let match;
+    let ranges: { start: number; end: number }[] = [];
+
+    const parseTime = (timeStr: string, meridiem?: string) => {
+      let [hours, minutes] = timeStr.split(':').map(Number);
+      if (meridiem) {
+        if (meridiem.toUpperCase() === 'PM' && hours < 12) hours += 12;
+        if (meridiem.toUpperCase() === 'AM' && hours === 12) hours = 0;
+      }
+      return hours * 60 + minutes;
+    };
+
+    while ((match = timeRangeRegex.exec(todayLine)) !== null) {
+      ranges.push({
+        start: parseTime(match[1], match[2]),
+        end: parseTime(match[3], match[4])
+      });
+    }
+
+    if (ranges.length === 0) return "UNCERTAIN";
+
+    const currentTime = now.getHours() * 60 + now.getMinutes();
+    
+    for (const range of ranges) {
+      const { start, end } = range;
+      const isOpen = end > start 
+        ? (currentTime >= start && currentTime < end)
+        : (currentTime >= start || currentTime < end);
+
+      if (isOpen) {
+        let minutesToClose;
+        if (end > start) {
+          minutesToClose = end - currentTime;
+        } else {
+          minutesToClose = currentTime >= start ? (1440 - currentTime + end) : (end - currentTime);
+        }
+
+        if (minutesToClose > 0 && minutesToClose <= 30) {
+          return "CLOSING_SOON";
+        }
+        return "OPEN";
+      }
+    }
+
+    return "CLOSED";
+  }
 
   function normalizeQuery(query: string): string {
     return query.trim().toLowerCase().replace(/\s+/g, ' ');
   }
 
   async function checkApiUsage(userId: string) {
+    const now = Date.now();
+    const cached = usageCache.get(userId);
+    if (cached && now - cached.timestamp < USAGE_CACHE_TTL) {
+      logger.debug(`Using cached API usage for user ${userId}`);
+      return { allowed: cached.allowed, error: cached.error };
+    }
+
     const db = getDb();
     if (!db) {
       logger.warn("Database not initialized. Skipping API usage check.");
@@ -154,7 +249,9 @@ async function startServer() {
       const totalCount = dbCount + bufferedCount;
 
       if (totalCount >= MAX_GOOGLE_CALLS_PER_DAY) {
-        return { allowed: false, error: "New place searches are temporarily unavailable today." };
+        const result = { allowed: false, error: "New place searches are temporarily unavailable today." };
+        usageCache.set(userId, { ...result, timestamp: now });
+        return result;
       }
 
       // 2. User Limit Check
@@ -163,10 +260,14 @@ async function startServer() {
       const userCount = userUsageDoc.exists ? userUsageDoc.data()?.count || 0 : 0;
 
       if (userCount >= MAX_GOOGLE_CALLS_PER_USER_PER_DAY) {
-        return { allowed: false, error: "Daily search limit reached for discovering new places." };
+        const result = { allowed: false, error: "Daily search limit reached for discovering new places." };
+        usageCache.set(userId, { ...result, timestamp: now });
+        return result;
       }
 
-      return { allowed: true };
+      const result = { allowed: true };
+      usageCache.set(userId, { ...result, timestamp: now });
+      return result;
     } catch (error: any) {
       logger.error("Firestore Error in checkApiUsage:", error.message);
       // If Firestore is misconfigured, we allow the request but log the error
@@ -459,7 +560,7 @@ async function startServer() {
     }
   });
 
-  // API Route for Emergency Alerts (Server-side to bypass CORS)
+  // API Route for Emergency Alerts (Server-side to bypass CORS) - הוחזר מהקובץ המקורי
   app.get("/api/emergency-alerts", async (req, res) => {
     try {
       // Using the official Home Front Command (Oref) API
@@ -504,6 +605,267 @@ async function startServer() {
       res.json([]);
     }
   });
+
+// --- API Route for Live Check (Production: AI Separation of Concerns) ---
+app.post("/live-check", async (req, res) => {
+  try {
+    const { placeId, placeName, city, address, openingHours, userId, email } = req.body;
+
+    if (!placeName) return res.status(400).json({ error: "Missing placeName" });
+
+    // 1. Cache Logic
+    const cacheKey = `${placeName}-${address || city || ''}`.toLowerCase().trim();
+    const now = Date.now();
+    const cached = liveCheckCache.get(cacheKey);
+
+    if (cached && (now - cached.timestamp < 30 * 60 * 1000)) {
+      logger.info(`Cache hit for: ${placeName}`);
+      return res.json(cached.data);
+    }
+
+    // 2. Time Logic & Constants (Calculated early for rate limiting)
+    const israelTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' });
+    const israelTime = new Date(israelTimeStr);
+    const currentDate = israelTime.toISOString().split('T')[0];
+    const currentMinutes = israelTime.getHours() * 60 + israelTime.getMinutes();
+    
+    // Time Injection for Prompts
+    const currentHour = israelTime.getHours().toString().padStart(2, '0');
+    const currentMinuteStr = israelTime.getMinutes().toString().padStart(2, '0');
+    const timeInjection = `The CURRENT LOCAL TIME in Israel is exactly ${currentHour}:${currentMinuteStr}. Evaluate the real-time status strictly based on this local time.`;
+
+    // 2.5 Rate Limiting (Per User) - Admin Bypass
+    const isAdmin = email === "itay8090100@gmail.com";
+    if (userId && !isAdmin) {
+      const db = getDb();
+      if (db) {
+        const usageRef = db.collection("userLiveCheckUsage").doc(`${userId}_${currentDate}`);
+        const usageDoc = await usageRef.get();
+        const count = usageDoc.exists ? usageDoc.data()?.count || 0 : 0;
+
+        if (count >= 3) {
+          logger.warn(`User ${userId} reached daily live-check limit.`);
+          return res.status(429).json({ error: "DAILY_LIMIT_REACHED" });
+        }
+
+        await usageRef.set({
+          count: admin.firestore.FieldValue.increment(1),
+          lastChecked: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+    }
+
+    logger.info(`Performing fresh agentic live check for: ${placeName}`);
+
+    // STEP 1: PERPLEXITY CALL (The Researcher)
+    const perplexityResponse = await perplexityClient.chat.completions.create({
+      model: "sonar",
+      messages: [
+        {
+          role: "system",
+          content: `You are an elite Israeli web researcher. Search the web (Facebook, Easy.co.il, official municipal sites, Home Front Command) for the exact operating hours and status of the provided business for TODAY in Israel. Deeply search for: Phone number, Google Maps URL, Reviews URL, Ontopo URL (if applicable), and a high-quality Image URL. Search explicitly for the GOOGLE MAPS rating (out of 5 stars). Do NOT use Easy.co.il or 10-point scale ratings. For 'reviewsUrl', you MUST ONLY provide the direct URL to the GOOGLE MAPS REVIEWS for this place. Do NOT provide links to Ontopo, Rest, Easy, or any other review site. If you cannot find the Google Maps review link, return null. Write a detailed 1-2 paragraph summary in Hebrew. Mention if it's closed due to security situations, holidays, or just normal hours. CRITICAL: Do NOT just return generic day-of-the-week hours. You MUST verify if there is a specific update, early closure, or exact hours for the EXACT DATE provided. Pay attention to early closure times. If the business closes earlier today than a normal day, report the exact early closing hour. ${timeInjection} DO NOT output JSON. Just pure informative text.`
+        },
+        {
+          role: "user",
+          content: `Name: ${placeName}, Address: ${address || city}, City: ${city}. Today is ${currentDate}.`
+        }
+      ]
+    });
+
+    const rawResearchText = perplexityResponse.choices?.[0]?.message?.content || "";
+    logger.info("=== RAW RESEARCH TEXT ===");
+    logger.info(rawResearchText);
+    logger.info("=========================");
+
+    // STEP 2: OPENAI CALL (The Judge)
+    const judgeResponse = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a logic engine. You will receive raw web research about an Israeli business, the static opening hours, and the current time. ${timeInjection} Your job is to output a STRICT JSON object representing the real-time status.
+
+Output schema:
+{
+  "finalStatus": "OPEN" | "CLOSED" | "UNCERTAIN",
+  "confidence": number (0.0 to 1.0),
+  "specialCase": "NONE" | "HOLIDAY_OR_EVENT" | "SECURITY" | "VERIFIED_ONLINE",
+  "reason": "1 short, natural-sounding, native Hebrew sentence explaining the decision (e.g., 'המקום נסגר בעוד כ-10 דקות', 'העסק סגור היום'). Do not sound robotic or literal. If the math shows the place is currently CLOSED, BUT it has another shift starting later TODAY (Example: current time is 14:00, and hours are 08:00-13:00, 17:00-22:00), the reason MUST indicate when it reopens. Example: 'המקום סגור כעת, יפתח שוב בשעה 17:00'.",
+  "todayHours": string | "UNKNOWN",
+  "enrichedData": { 
+    "phoneNumber": string|null, 
+    "websiteUrl": string|null, 
+    "googleMapsUrl": string|null, 
+    "reviewsUrl": string|null, 
+    "imageUrl": string|null, 
+    "ontopoUrl": string|null, 
+    "todayHours": string|null,
+    "rating": number|null
+  }
+}`
+        },
+        {
+          role: "user",
+          content: `
+            Research Text: ${rawResearchText}
+            Current Date: ${currentDate}
+            Current Time (minutes from midnight): ${currentMinutes}
+            Static Opening Hours: ${JSON.stringify(openingHours)}
+            
+            Do the math and return the JSON.`
+        }
+      ]
+    });
+
+    // STEP 3: PARSING & FALLBACK
+    let result;
+    try {
+      const judgeContent = judgeResponse.choices?.[0]?.message?.content || "{}";
+      const parsed = JSON.parse(judgeContent);
+      
+      result = {
+        finalStatus: parsed.finalStatus || "UNCERTAIN",
+        confidence: parsed.confidence || 0,
+        specialCase: parsed.specialCase || "NONE",
+        reason: (parsed.reason || "לא ניתן לקבוע סטטוס ודאי").replace(/([*#])/g, '').trim(),
+        todayHours: parsed.todayHours || "UNKNOWN",
+        checkedAt: now,
+        aiUsed: true,
+        enrichedData: parsed.enrichedData || { 
+          phoneNumber: null, 
+          websiteUrl: null, 
+          googleMapsUrl: null, 
+          reviewsUrl: null, 
+          imageUrl: null, 
+          ontopoUrl: null, 
+          todayHours: null,
+          rating: null
+        }
+      };
+    } catch (e) {
+      logger.error("Error parsing Judge response:", e);
+      const fallbackStatus = calculateBaseStatus(openingHours, israelTime);
+      result = {
+        finalStatus: fallbackStatus,
+        confidence: 0.5,
+        specialCase: "NONE",
+        reason: "שגיאה בניתוח המידע, מסתמך על שעות רגילות.",
+        todayHours: "UNKNOWN",
+        checkedAt: now,
+        aiUsed: false,
+        enrichedData: { 
+          phoneNumber: null, 
+          websiteUrl: null, 
+          googleMapsUrl: null, 
+          reviewsUrl: null, 
+          imageUrl: null, 
+          ontopoUrl: null, 
+          todayHours: null,
+          rating: null
+        }
+      };
+    }
+
+    // 7. Global DB Sync (Affects all users) - Dual Update Strategy
+    if (placeId && result.confidence >= 0.9) {
+      const db = getDb();
+      if (db) {
+        (async () => {
+          try {
+            const placeRef = db.collection("places").doc(placeId);
+            const placeDoc = await placeRef.get();
+            const placeData = placeDoc.data() || {};
+            
+            const currentAiHours = result.enrichedData?.todayHours || result.todayHours;
+            const daysHe = ["יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "יום שבת"];
+            const todayHe = daysHe[israelTime.getDay()];
+            
+            let existingHoursArray = placeData.openingHours || [];
+            if (!Array.isArray(existingHoursArray)) existingHoursArray = [];
+            
+            const todayLineIndex = existingHoursArray.findIndex((line: string) => line && typeof line === 'string' && line.startsWith(todayHe));
+            const existingTodayHours = todayLineIndex !== -1 ? existingHoursArray[todayLineIndex].split(': ')[1] : null;
+            
+            const hoursConflict = currentAiHours && currentAiHours !== "UNKNOWN" && currentAiHours !== existingTodayHours;
+
+            const updateObj: any = {
+              liveCheckResult: {
+                ...result,
+                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+              }
+            };
+
+            // Branch A vs Branch B Logic
+            if (hoursConflict) {
+              if (result.specialCase === "NONE") {
+                // BRANCH A: Permanent Fix (Static hours were wrong or missing)
+                const newArray = [...existingHoursArray];
+                if (todayLineIndex !== -1) {
+                  newArray[todayLineIndex] = `${todayHe}: ${currentAiHours}`;
+                } else {
+                  // Day missing from array, add it
+                  newArray.push(`${todayHe}: ${currentAiHours}`);
+                }
+                updateObj.openingHours = newArray;
+                // Clear override if we fixed the source
+                updateObj.temporaryHoursOverride = admin.firestore.FieldValue.delete();
+              } else {
+                // BRANCH B: Temporary Mask (Holiday/Security/Special Event)
+                updateObj.temporaryHoursOverride = {
+                  date: currentDate,
+                  todayHours: currentAiHours,
+                  finalStatus: result.finalStatus,
+                  reason: result.reason
+                };
+              }
+            }
+
+            // Smart Enrichment: Only update missing fields
+            const enriched = result.enrichedData || {};
+            const fieldsToSync = ['phoneNumber', 'websiteUrl', 'googleMapsUrl', 'reviewsUrl', 'imageUrl', 'ontopoUrl', 'rating'];
+            
+            fieldsToSync.forEach(field => {
+              if (enriched[field] !== undefined && enriched[field] !== null && (!placeData[field] || placeData[field] === "")) {
+                // Special handling for rating to ensure it's a valid number
+                if (field === 'rating') {
+                  const r = parseFloat(enriched[field]);
+                  if (!isNaN(r) && r >= 0 && r <= 5) {
+                    updateObj[field] = r;
+                  }
+                } else {
+                  updateObj[field] = enriched[field];
+                }
+              }
+            });
+
+            await placeRef.set(updateObj, { merge: true });
+          } catch (err) {
+            logger.error("Global DB Sync Error:", err);
+          }
+        })();
+      }
+    }
+
+    liveCheckCache.set(cacheKey, { data: result, timestamp: now });
+    
+    const tempOverride = {
+      date: currentDate,
+      todayHours: result.enrichedData?.todayHours || result.todayHours,
+      finalStatus: result.finalStatus,
+      reason: result.reason
+    };
+
+    res.json({
+      ...result,
+      temporaryHoursOverride: tempOverride
+    });
+
+  } catch (error) {
+    logger.error("Critical error in /live-check:", error);
+    res.json({ finalStatus: "UNCERTAIN", reason: "שגיאה בבדיקה בזמן אמת", checkedAt: Date.now(), aiUsed: false });
+  }
+});
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
