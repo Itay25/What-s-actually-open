@@ -1,5 +1,6 @@
 import { Place, Status, NormalizedOpeningHours, TimeRange } from '../types';
 import { normalizeOpeningHours } from '../utils/openingHours';
+import { isLiveCheckValid } from '../utils/liveCheck';
 
 const DAY_INDEX_TO_KEY: (keyof NormalizedOpeningHours)[] = [
   'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
@@ -29,6 +30,54 @@ export interface StatusResult {
  */
 export function calculateRealOpenStatus(place: Place, currentTime: Date = new Date()): StatusResult {
   const nowTimestamp = currentTime.getTime();
+
+  // --- 0. AI LIVE CHECK OVERRIDE ---
+  if (isLiveCheckValid(place) && place.liveCheckResult && place.liveCheckResult.confidence >= 0.7) {
+    const aiStatus = place.liveCheckResult.finalStatus;
+    const lastUpdateMinutes = Math.round((nowTimestamp - place.liveCheckResult.checkedAt) / 60000);
+    
+    if (aiStatus === 'OPEN') {
+      return {
+        isOpen: true,
+        confidence: place.liveCheckResult.confidence * 100,
+        source: "mixed",
+        uiStatus: "פתוח",
+        uiColor: "green",
+        secondaryMessage: "נבדק בזמן אמת על ידי בינה מלאכותית",
+        lastUpdateMinutes
+      };
+    } else if (aiStatus === 'CLOSED') {
+      return {
+        isOpen: false,
+        confidence: place.liveCheckResult.confidence * 100,
+        source: "mixed",
+        uiStatus: "סגור",
+        uiColor: "red",
+        secondaryMessage: "נבדק בזמן אמת על ידי בינה מלאכותית",
+        lastUpdateMinutes
+      };
+    } else if (aiStatus === 'CLOSING_SOON') {
+      return {
+        isOpen: true,
+        confidence: place.liveCheckResult.confidence * 100,
+        source: "mixed",
+        uiStatus: "נסגר בקרוב",
+        uiColor: "yellow",
+        secondaryMessage: "נבדק בזמן אמת על ידי בינה מלאכותית",
+        lastUpdateMinutes
+      };
+    } else if (aiStatus === 'UNCERTAIN') {
+      return {
+        isOpen: false, // Fallback
+        confidence: place.liveCheckResult.confidence * 100,
+        source: "mixed",
+        uiStatus: "לא ודאי",
+        uiColor: "orange",
+        secondaryMessage: "אין מספיק מידע עדכני",
+        lastUpdateMinutes
+      };
+    }
+  }
 
   const parseTimestamp = (ts: any): number | null => {
     if (!ts) return null;
