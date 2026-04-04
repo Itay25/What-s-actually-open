@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
-import { Place, Status } from './types';
+import { Place, Status, LiveCheckResult } from './types';
 import { MOCK_PLACES, CATEGORIES } from './constants';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   MapPin, Users, Clock, ShieldAlert, Navigation, 
-  CheckCircle2, XCircle, HelpCircle, 
+  CheckCircle2, XCircle, HelpCircle, Phone,
   ShoppingCart, Store, Coffee, Utensils, PlusSquare, Fuel, Pill,
   Search,
   ThumbsUp,
@@ -25,7 +25,8 @@ import {
   Sliders,
   Beer,
   MoreHorizontal,
-  Lock
+  Lock,
+  Sparkles
 } from 'lucide-react';
 import { cn, UserProfile, Reward, CommunityReport, TimeRange } from './types';
 import { validateBusinessStatus, mapValidationToStatus } from './services/validationEngine';
@@ -36,10 +37,35 @@ import { discoverPlaces, searchPlaces, getPlaceById } from './services/placesSer
 import { BusinessMarker } from './components/BusinessMarker';
 import { MapDiscovery } from './components/MapDiscovery';
 import { RewardActionButton } from './components/RewardActionButton';
+import { LiveCheckButton } from './components/LiveCheckButton';
 import { checkEmergencyStatus } from './services/emergencyService';
+import { isLiveCheckValid } from './utils/liveCheck';
 import { auth, googleProvider, db } from './firebase';
 import { signInWithPopup, onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, increment, arrayUnion, collection, addDoc, query, where, getDocs, limit, orderBy } from 'firebase/firestore';
+
+const SPECIAL_CASE_MESSAGES: Record<string, string> = {
+  'HOLIDAY': 'סגור עקב חג',
+  'SECURITY': 'ייתכנו שינויים עקב המצב הביטחוני',
+  'TEMP_CLOSED': 'סגור זמנית',
+  'EVENT': 'סגור עקב אירוע',
+  'WEATHER': 'סגור עקב מזג אוויר',
+  'STRIKE': 'סגור עקב שביתה'
+};
+
+const formatRelativeTime = (timestamp: number) => {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'הרגע';
+  if (minutes === 1) return 'לפני דקה';
+  if (minutes < 60) return `לפני ${minutes} דקות`;
+  const hours = Math.floor(minutes / 60);
+  if (hours === 1) return 'לפני שעה';
+  if (hours < 24) return `לפני ${hours} שעות`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return 'לפני יום';
+  return `לפני ${days} ימים`;
+};
 
 const REWARDS: Reward[] = [
   { id: 'reporter-advanced', title: 'מדווח מתקדם', description: 'מיקום הסמן הופך למדויק יותר', reportsRequired: 25, icon: '🛰', type: 'utility' },
@@ -445,6 +471,16 @@ export default function App() {
           const newLoc: [number, number] = [latitude, longitude];
           setUserLocation(newLoc);
           if (mapRef.current) {
+            const currentCenter = mapRef.current.getCenter();
+            const currentZoom = mapRef.current.getZoom();
+            const latDiff = Math.abs(currentCenter.lat - latitude);
+            const lngDiff = Math.abs(currentCenter.lng - longitude);
+
+            if (latDiff < 0.0001 && lngDiff < 0.0001 && currentZoom === 17) {
+              setRefreshTrigger(prev => prev + 1);
+              return;
+            }
+
             setIsMapAnimating(true);
             setRefreshTrigger(prev => prev + 1);
             mapRef.current.flyTo(newLoc, 17, {
@@ -548,6 +584,30 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Fetch Live Check usage for today
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchUsage = async () => {
+      try {
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+        const usageDocRef = doc(db, 'userLiveCheckUsage', `${user.uid}_${today}`);
+        const usageDoc = await getDoc(usageDocRef);
+        
+        if (usageDoc.exists()) {
+          const count = usageDoc.data().count || 0;
+          setUserProfile(prev => prev ? { ...prev, liveCheckUsageToday: count } : null);
+        } else {
+          setUserProfile(prev => prev ? { ...prev, liveCheckUsageToday: 0 } : null);
+        }
+      } catch (e) {
+        logger.error("Failed to fetch live check usage", e);
+      }
+    };
+
+    fetchUsage();
+  }, [user]);
+
   const handleLogin = useCallback(async () => {
     try {
       await signInWithPopup(auth, googleProvider);
@@ -594,6 +654,31 @@ export default function App() {
     });
 
     if (mapRef.current) {
+      const currentCenter = mapRef.current.getCenter();
+      const currentZoom = mapRef.current.getZoom();
+      const latDiff = Math.abs(currentCenter.lat - place.lat);
+      const lngDiff = Math.abs(currentCenter.lng - place.lng);
+
+      if (latDiff < 0.0001 && lngDiff < 0.0001 && currentZoom === 17) {
+        // Already there, just open the sheet
+        (async () => {
+          let fullPlace = place;
+          if (place.isLocal) {
+            try {
+              const fetched = await getPlaceById(place.id);
+              if (fetched) {
+                fullPlace = { ...fetched, isLocal: true };
+              }
+            } catch (error) {
+              logger.error("Error fetching full place details on selection:", error);
+            }
+          }
+          setSelectedPlace(fullPlace);
+          setImageError(false);
+        })();
+        return;
+      }
+
       setIsMapAnimating(true);
       isNavigating.current = true;
       // First, animate smoothly
@@ -1065,12 +1150,13 @@ export default function App() {
     // We filter markers that are too close to each other in screen space to avoid visual clutter
     // Threshold depends on zoom level (pixels)
     const getThreshold = (zoom: number) => {
-      if (zoom >= 18) return 0; // Show all at high zoom
-      if (zoom >= 16) return 25;
-      if (zoom >= 14) return 40;
-      return 50;
+      if (zoom >= 18) return 40;
+      if (zoom >= 16) return 50;
+      if (zoom >= 14) return 60;
+      return 75;
     };
     const threshold = getThreshold(mapZoom);
+    const hasActiveFilter = activeCategory !== null && activeCategory !== 'all';
     const distributed: any[] = [];
     
     // Always prioritize selected place, pinned places, and temp visible places
@@ -1109,7 +1195,7 @@ export default function App() {
       const p1 = project(place.lat, place.lng);
 
       // Check if too close to any already added place in screen space
-      const isTooClose = distributed.some(p => {
+      const isTooClose = hasActiveFilter ? false : distributed.some(p => {
         const p2 = project(p.lat, p.lng);
         const dx = p1.x - p2.x;
         const dy = p1.y - p2.y;
@@ -1128,7 +1214,7 @@ export default function App() {
     });
 
     return distributed;
-  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces, tempVisiblePlaceId]);
+  }, [filteredPlaces, mapZoom, calculateProminenceScore, selectedPlace, pinnedPlaces, tempVisiblePlaceId, activeCategory]);
 
   // Handle exit animations by keeping places in state for a short duration
   useEffect(() => {
@@ -1184,19 +1270,21 @@ export default function App() {
           isNavigating={isNavigating}
         />
 
-        {visiblePlaces.map((place: any) => (
-          <BusinessMarker
-            key={place.id}
-            place={place}
-            isActive={selectedPlace?.id === place.id}
-            zoom={mapZoom}
-            showLabel={place.showLabel}
-            labelType={place.labelType}
-            isDimmed={place.isDimmed}
-            isLabelDimmed={place.isLabelDimmed}
-            onClick={handlePlaceClick}
-          />
-        ))}
+        <AnimatePresence>
+          {visiblePlaces.map((place: any) => (
+            <BusinessMarker
+              key={place.id}
+              place={place}
+              isActive={selectedPlace?.id === place.id}
+              zoom={mapZoom}
+              showLabel={place.showLabel}
+              labelType={place.labelType}
+              isDimmed={place.isDimmed}
+              isLabelDimmed={place.isLabelDimmed}
+              onClick={handlePlaceClick}
+            />
+          ))}
+        </AnimatePresence>
 
         {/* User Location Marker */}
         {isValidLatLng(userLocation[0], userLocation[1]) && (
@@ -1580,7 +1668,10 @@ export default function App() {
                 <motion.div 
                   whileHover={{ scale: 1.01 }}
                   whileTap={{ scale: 0.99 }}
-                  className="w-full h-44 sm:h-56 rounded-[28px] overflow-hidden bg-white relative shadow-sm border border-black/5 cursor-pointer flex items-center justify-center group"
+                  className={cn(
+                    "w-full h-44 sm:h-56 rounded-[28px] overflow-hidden bg-white relative shadow-sm border border-black/5 cursor-pointer flex items-center justify-center group",
+                    (!selectedPlace.imageUrl || imageError) && "pb-12"
+                  )}
                 >
                   {(!selectedPlace.imageUrl || imageError) ? (
                     <PlacePlaceholder category={selectedPlace.category} />
@@ -1588,7 +1679,7 @@ export default function App() {
                     <motion.img 
                       initial={{ filter: "brightness(1)" }}
                       whileHover={{ filter: "brightness(1.05)" }}
-                      src={selectedPlace.potentialImages?.[imageIndex] || selectedPlace.imageUrl}
+                      src={(isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.imageUrl) || selectedPlace.potentialImages?.[imageIndex] || selectedPlace.imageUrl}
                       alt={selectedPlace.name}
                       className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
                       referrerPolicy="no-referrer"
@@ -1604,6 +1695,35 @@ export default function App() {
                   <div className="absolute top-4 right-4 bg-white/90 backdrop-blur-md px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider shadow-sm border border-black/5">
                     {selectedPlace.category}
                   </div>
+                  <LiveCheckButton 
+                    hasImage={!!selectedPlace.imageUrl && !imageError} 
+                    placeId={selectedPlace.id}
+                    placeName={selectedPlace.name}
+                    city={selectedPlace.city}
+                    address={selectedPlace.address}
+                    openingHours={selectedPlace.openingHours}
+                    onResult={(result) => {
+                      const updatedPlace = selectedPlace ? { 
+                        ...selectedPlace, 
+                        liveCheckResult: result,
+                        temporaryHoursOverride: result.temporaryHoursOverride
+                      } : null;
+                      setSelectedPlace(updatedPlace);
+                      
+                      const updateList = (prev: Place[]) => prev.map(p => p.id === selectedPlace?.id ? { 
+                        ...p, 
+                        liveCheckResult: result,
+                        temporaryHoursOverride: result.temporaryHoursOverride
+                      } : p);
+                      setDiscoveredPlaces(updateList);
+                      setPinnedPlaces(updateList);
+                      
+                      // Increment usage locally
+                      setUserProfile(prev => prev ? { ...prev, liveCheckUsageToday: (prev.liveCheckUsageToday || 0) + 1 } : null);
+                    }}
+                    lastCheckedAt={selectedPlace.liveCheckResult?.checkedAt}
+                    dailyLimitReached={(userProfile?.liveCheckUsageToday || 0) >= 3 && userProfile?.email !== 'itay8090100@gmail.com'}
+                  />
                 </motion.div>
               </div>
 
@@ -1619,6 +1739,17 @@ export default function App() {
                         </span>
                       )}
                     </p>
+                    {( (isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.rating) || selectedPlace.rating) && (
+                      <div className="flex items-center gap-1 mt-1">
+                        <Star size={12} className="text-amber-400 fill-amber-400" />
+                        <span className="text-xs font-bold text-black/70">
+                          {(isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.rating) || selectedPlace.rating}
+                        </span>
+                        <span className="text-[10px] text-black/40 font-medium">
+                          ({(isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.totalReviews) || selectedPlace.userRatingsTotal || 0} ביקורות)
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <button 
                     onClick={() => {
@@ -1632,127 +1763,189 @@ export default function App() {
                 </div>
 
                 {/* Status Card */}
-                <div className={cn(
-                  "p-5 sm:p-6 rounded-[28px] mb-6 sm:mb-8 flex flex-col gap-3 sm:gap-4 transition-all border shadow-sm",
-                  selectedPlaceData?.status === 'active' ? "bg-[#2ECC71]/5 border-[#2ECC71]/20" : 
-                  selectedPlaceData?.status === 'closing_soon' ? "bg-[#9ACD32]/5 border-[#9ACD32]/20" :
-                  selectedPlaceData?.status === 'maybe' ? "bg-[#F39C12]/5 border-[#F39C12]/20" : "bg-[#E74C3C]/5 border-[#E74C3C]/20",
-                  selectedPlaceData?.isFaded && "opacity-60"
-                )}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3.5">
-                      <div 
-                        className="w-4 h-4 status-pulse-dot shadow-sm"
-                        style={{ 
-                          backgroundColor: 
-                            selectedPlaceData?.status === 'active' ? "#2ECC71" : 
-                            selectedPlaceData?.status === 'closing_soon' ? "#9ACD32" :
-                            selectedPlaceData?.status === 'maybe' ? "#F39C12" : "#E74C3C",
-                          '--pulse-color': 
-                            selectedPlaceData?.status === 'active' ? "rgba(46, 204, 113, 0.4)" : 
-                            selectedPlaceData?.status === 'closing_soon' ? "rgba(154, 205, 50, 0.4)" :
-                            selectedPlaceData?.status === 'maybe' ? "rgba(243, 156, 18, 0.4)" : "rgba(231, 76, 60, 0.4)"
-                        } as React.CSSProperties}
-                      />
-                      <div className="flex flex-col">
-                        <span className="text-lg sm:text-xl font-bold text-black flex items-center gap-2">
-                          <span>
-                            {selectedPlaceData?.reasoning_hebrew}
-                          </span>
-                        </span>
-                        {selectedPlaceData?.secondary_message && (
-                          <span className="text-xs font-medium text-black/60">
-                            {selectedPlaceData.secondary_message}
-                          </span>
-                        )}
-                        {selectedPlaceData?.lastUpdateMinutes !== undefined && (
-                          <span className="text-[10px] font-bold opacity-40 uppercase tracking-wider">
-                            {selectedPlaceData.lastUpdateMinutes === 0 ? 'עודכן הרגע' : 
-                             selectedPlaceData.lastUpdateMinutes === 1 ? 'עודכן לפני דקה' :
-                             `עודכן לפני ${selectedPlaceData.lastUpdateMinutes} דקות`}
-                          </span>
-                        )}
+                <AnimatePresence mode="wait">
+                  <motion.div 
+                    key={`${selectedPlaceData?.id}-${selectedPlaceData?.status}-${selectedPlaceData?.liveCheckResult?.checkedAt}`}
+                    initial={{ opacity: 0, y: -5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.3, ease: "easeInOut" }}
+                    className={cn(
+                      "p-5 sm:p-6 rounded-[28px] mb-6 sm:mb-8 flex flex-col gap-3 sm:gap-4 transition-all border shadow-sm",
+                      selectedPlaceData?.status === 'active' ? "bg-[#2ECC71]/5 border-[#2ECC71]/20" : 
+                      selectedPlaceData?.status === 'closing_soon' ? "bg-[#9ACD32]/5 border-[#9ACD32]/20" :
+                      selectedPlaceData?.status === 'maybe' ? "bg-[#F39C12]/5 border-[#F39C12]/20" : "bg-[#E74C3C]/5 border-[#E74C3C]/20",
+                      selectedPlaceData?.isFaded && "opacity-60"
+                    )}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3.5">
+                        <div 
+                          className="w-4 h-4 status-pulse-dot shadow-sm"
+                          style={{ 
+                            backgroundColor: 
+                              selectedPlaceData?.status === 'active' ? "#2ECC71" : 
+                              selectedPlaceData?.status === 'closing_soon' ? "#9ACD32" :
+                              selectedPlaceData?.status === 'maybe' ? "#F39C12" : "#E74C3C",
+                            '--pulse-color': 
+                              selectedPlaceData?.status === 'active' ? "rgba(46, 204, 113, 0.4)" : 
+                              selectedPlaceData?.status === 'closing_soon' ? "rgba(154, 205, 50, 0.4)" :
+                              selectedPlaceData?.status === 'maybe' ? "rgba(243, 156, 18, 0.4)" : "rgba(231, 76, 60, 0.4)"
+                          } as React.CSSProperties}
+                        />
+                        <div className="flex flex-col">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-lg sm:text-xl font-bold text-black">
+                              {selectedPlaceData?.reasoning_hebrew}
+                            </span>
+                            {selectedPlaceData?.lastUpdateMinutes !== undefined && (
+                              <>
+                                <span className="text-black/20 font-light">•</span>
+                                <div className="flex items-center gap-1.5 text-[10px] font-bold opacity-40 uppercase tracking-wider bg-black/5 px-2 py-0.5 rounded-full">
+                                  <Clock size={10} />
+                                  <span>
+                                    {selectedPlaceData.lastUpdateMinutes === 0 ? 'נבדק לפני רגע' : 
+                                     selectedPlaceData.lastUpdateMinutes === 1 ? 'עודכן לפני דקה' :
+                                     `עודכן לפני ${selectedPlaceData.lastUpdateMinutes} דקות`}
+                                  </span>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          {isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.reason && (
+                            <p className="text-[12px] text-gray-700 italic mt-2 border-r-2 border-blue-500 pr-3 leading-snug">
+                              {selectedPlace.liveCheckResult.reason}
+                            </p>
+                          )}
+                          {selectedPlaceData?.secondary_message && (
+                            <span className="text-xs font-medium text-black/60 mt-1">
+                              {selectedPlaceData.secondary_message}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Confidence & Reporters */}
-                  {(selectedPlaceData?.reportCount || 0) > 0 && (
-                    <div className="mt-2 pt-3 border-t border-black/5 flex flex-col gap-3">
-                      {/* Local Community Prompt for Awaiting Confirmation */}
-                      {selectedPlaceData?.reasoning_hebrew === "ממתין לאימות" && distanceToSelectedPlace <= 50 && (
-                        <div className="bg-blue-500/5 border border-blue-500/10 rounded-2xl p-4 flex flex-col gap-3">
+                    {/* Confidence & Reporters */}
+                    {(selectedPlaceData?.reportCount || 0) > 0 && (
+                      <div className="mt-2 pt-3 border-t border-black/5 flex flex-col gap-3">
+                        {/* Local Community Prompt for Awaiting Confirmation */}
+                        {selectedPlaceData?.reasoning_hebrew === "ממתין לאימות" && distanceToSelectedPlace <= 50 && (
+                          <div className="bg-blue-500/5 border border-blue-500/10 rounded-2xl p-4 flex flex-col gap-3">
+                            <div className="flex items-center gap-2">
+                              <HelpCircle size={16} className="text-blue-500" />
+                              <span className="text-xs font-bold text-blue-700">אתה נמצא בקרבת המקום. תוכל לאמת אם הוא פתוח?</span>
+                            </div>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={() => handleReport('open')}
+                                className="flex-1 bg-blue-500 text-white py-2 rounded-xl text-[10px] font-bold shadow-sm active:scale-95 transition-all"
+                              >
+                                פתוח עכשיו
+                              </button>
+                              <button 
+                                onClick={() => handleReport('closed')}
+                                className="flex-1 bg-white text-blue-500 border border-blue-500/20 py-2 rounded-xl text-[10px] font-bold shadow-sm active:scale-95 transition-all"
+                              >
+                                סגור עכשיו
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <HelpCircle size={16} className="text-blue-500" />
-                            <span className="text-xs font-bold text-blue-700">אתה נמצא בקרבת המקום. תוכל לאמת אם הוא פתוח?</span>
+                            {(() => {
+                              const openCount = selectedPlaceData?.openReportsCount || 0;
+                              const closedCount = selectedPlaceData?.closedReportsCount || 0;
+                              const isClosedMajority = closedCount > openCount;
+                              const displayCount = isClosedMajority ? closedCount : openCount;
+                              const displayPhotos = isClosedMajority ? selectedPlaceData?.closedReporterPhotos : selectedPlaceData?.openReporterPhotos;
+                              
+                              if (displayCount === 0) return null;
+
+                              return (
+                                <>
+                                  <div className="flex -space-x-2">
+                                    {displayPhotos?.map((photo, i) => (
+                                      <img 
+                                        key={i}
+                                        src={photo} 
+                                        alt="reporter" 
+                                        className="w-6 h-6 rounded-full border-2 border-white shadow-sm object-cover"
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    ))}
+                                    {displayCount > 3 && (
+                                      <div className="w-6 h-6 rounded-full border-2 border-white bg-gray-100 flex items-center justify-center text-[8px] font-bold text-gray-500 shadow-sm">
+                                        +{displayCount - 3}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <span className="text-[11px] font-medium text-black/60">
+                                    {displayCount === 1 ? 'משתמש אחד אישר' : `${displayCount} משתמשים אישרו`} שהמקום {isClosedMajority ? 'סגור' : 'פתוח'}
+                                  </span>
+                                </>
+                              );
+                            })()}
                           </div>
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={() => handleReport('open')}
-                              className="flex-1 bg-blue-500 text-white py-2 rounded-xl text-[10px] font-bold shadow-sm active:scale-95 transition-all"
-                            >
-                              פתוח עכשיו
-                            </button>
-                            <button 
-                              onClick={() => handleReport('closed')}
-                              className="flex-1 bg-white text-blue-500 border border-blue-500/20 py-2 rounded-xl text-[10px] font-bold shadow-sm active:scale-95 transition-all"
-                            >
-                              סגור עכשיו
-                            </button>
+                          <div className={cn(
+                            "px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-tight",
+                            selectedPlaceData?.confidenceLevel === 'high' ? "bg-green-100 text-green-700" :
+                            selectedPlaceData?.confidenceLevel === 'medium' ? "bg-orange-100 text-orange-700" :
+                            "bg-gray-100 text-gray-600"
+                          )}>
+                            {selectedPlaceData?.confidenceLevel === 'high' ? 'אמינות גבוהה' :
+                             selectedPlaceData?.confidenceLevel === 'medium' ? 'אמינות בינונית' :
+                             'אמינות נמוכה'}
                           </div>
+                        </div>
+                      </div>
+                    )}
+                  </motion.div>
+                </AnimatePresence>
+
+                {/* Uncertain UX & Enriched Data */}
+                {isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.finalStatus === 'UNCERTAIN' && (
+                  <div className="mb-6 sm:mb-8 p-6 bg-orange-50 rounded-[28px] border border-orange-100 flex flex-col gap-4">
+                    <div className="flex items-center gap-3 text-orange-700">
+                      <div className="w-10 h-10 rounded-full bg-orange-100 flex items-center justify-center">
+                        <HelpCircle size={20} />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-sm font-bold">לא מצאנו שעות ודאיות ברשת להיום.</span>
+                        <span className="text-[11px] opacity-70">מומלץ להתקשר לעסק לוודא זמינות:</span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex flex-col gap-2">
+                      {selectedPlace.liveCheckResult.enrichedData?.phoneNumber && (
+                        <div className="flex flex-col gap-2">
+                          <span className="text-xs font-medium text-orange-800/60">מומלץ לוודא טלפונית לפני ההגעה:</span>
+                          <a 
+                            href={`tel:${selectedPlace.liveCheckResult.enrichedData.phoneNumber}`}
+                            className="w-full bg-white border border-orange-200 text-orange-600 py-3 rounded-2xl text-lg font-black flex items-center justify-center gap-3 shadow-sm active:scale-95 transition-all hover:bg-orange-50"
+                          >
+                            <Phone size={20} />
+                            {selectedPlace.liveCheckResult.enrichedData.phoneNumber}
+                          </a>
                         </div>
                       )}
-
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          {(() => {
-                            const openCount = selectedPlaceData?.openReportsCount || 0;
-                            const closedCount = selectedPlaceData?.closedReportsCount || 0;
-                            const isClosedMajority = closedCount > openCount;
-                            const displayCount = isClosedMajority ? closedCount : openCount;
-                            const displayPhotos = isClosedMajority ? selectedPlaceData?.closedReporterPhotos : selectedPlaceData?.openReporterPhotos;
-                            
-                            if (displayCount === 0) return null;
-
-                            return (
-                              <>
-                                <div className="flex -space-x-2">
-                                  {displayPhotos?.map((photo, i) => (
-                                    <img 
-                                      key={i}
-                                      src={photo} 
-                                      alt="reporter" 
-                                      className="w-6 h-6 rounded-full border-2 border-white shadow-sm object-cover"
-                                      referrerPolicy="no-referrer"
-                                    />
-                                  ))}
-                                  {displayCount > 3 && (
-                                    <div className="w-6 h-6 rounded-full border-2 border-white bg-gray-100 flex items-center justify-center text-[8px] font-bold text-gray-500 shadow-sm">
-                                      +{displayCount - 3}
-                                    </div>
-                                  )}
-                                </div>
-                                <span className="text-[11px] font-medium text-black/60">
-                                  {displayCount === 1 ? 'משתמש אחד אישר' : `${displayCount} משתמשים אישרו`} שהמקום {isClosedMajority ? 'סגור' : 'פתוח'}
-                                </span>
-                              </>
-                            );
-                          })()}
-                        </div>
-                        <div className={cn(
-                          "px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-tight",
-                          selectedPlaceData?.confidenceLevel === 'high' ? "bg-green-100 text-green-700" :
-                          selectedPlaceData?.confidenceLevel === 'medium' ? "bg-orange-100 text-orange-700" :
-                          "bg-gray-100 text-gray-600"
-                        )}>
-                          {selectedPlaceData?.confidenceLevel === 'high' ? 'אמינות גבוהה' :
-                           selectedPlaceData?.confidenceLevel === 'medium' ? 'אמינות בינונית' :
-                           'אמינות נמוכה'}
-                        </div>
-                      </div>
+                      
+                      {selectedPlace.liveCheckResult.enrichedData?.googleMapsUrl && (
+                        <a 
+                          href={selectedPlace.liveCheckResult.enrichedData.googleMapsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full bg-white/50 border border-orange-200/50 text-orange-700/60 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all"
+                        >
+                          <Globe size={14} />
+                          בדוק ביקורות אחרונות בגוגל
+                        </a>
+                      )}
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
 
                 <div className="mb-6 sm:mb-8">
                   {/* Presence and Update boxes removed as per request */}
@@ -1801,95 +1994,106 @@ export default function App() {
                       </button>
                     )}
                   </div>
-                  {selectedPlace.normalizedOpeningHours || (Array.isArray(selectedPlace.openingHours) && selectedPlace.openingHours.length > 0) ? (
-                    <div className="flex flex-col gap-2.5">
-                      {selectedPlace.normalizedOpeningHours ? (
-                        Object.entries(selectedPlace.normalizedOpeningHours)
-                          .sort((a, b) => {
-                            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                            return days.indexOf(a[0]) - days.indexOf(b[0]);
-                          })
-                          .filter(([day]) => {
-                            if (showFullHours) return true;
-                            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                            return day === days[new Date().getDay()];
-                          })
-                          .map(([day, hoursData]) => {
-                            const ranges = hoursData as TimeRange[];
-                            const daysHe: Record<string, string> = {
-                              Sunday: 'יום ראשון',
-                              Monday: 'יום שני',
-                              Tuesday: 'יום שלישי',
-                              Wednesday: 'יום רביעי',
-                              Thursday: 'יום חמישי',
-                              Friday: 'יום שישי',
-                              Saturday: 'יום שבת'
-                            };
-                            const dayHe = daysHe[day] || day;
-                            const isToday = day === ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()];
-                            
-                            let hoursStr = '';
-                            if (ranges.length === 0) {
-                              hoursStr = 'סגור';
-                            } else if (ranges.length === 1 && ranges[0].open === 0 && ranges[0].close === 0) {
-                              hoursStr = 'פתוח 24 שעות';
-                            } else {
-                              const formatTime = (m: number) => {
-                                const h = Math.floor(m / 60);
-                                const min = m % 60;
-                                return `${h.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`;
+                  
+                  {(() => {
+                    return selectedPlace.normalizedOpeningHours || (Array.isArray(selectedPlace.openingHours) && selectedPlace.openingHours.length > 0) ? (
+                      <div className="flex flex-col gap-2.5">
+                        {selectedPlace.normalizedOpeningHours ? (
+                          Object.entries(selectedPlace.normalizedOpeningHours)
+                            .sort((a, b) => {
+                              const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                              return days.indexOf(a[0]) - days.indexOf(b[0]);
+                            })
+                            .filter(([day]) => {
+                              if (showFullHours) return true;
+                              const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                              return day === days[new Date().getDay()];
+                            })
+                            .map(([day, hoursData]) => {
+                              const ranges = hoursData as TimeRange[];
+                              const daysHe: Record<string, string> = {
+                                Sunday: 'יום ראשון',
+                                Monday: 'יום שני',
+                                Tuesday: 'יום שלישי',
+                                Wednesday: 'יום רביעי',
+                                Thursday: 'יום חמישי',
+                                Friday: 'יום שישי',
+                                Saturday: 'יום שבת'
                               };
-                              hoursStr = ranges.map(r => `${formatTime(r.open)} – ${formatTime(r.close)}`).join(', ');
-                            }
+                              const dayHe = daysHe[day] || day;
+                              const todayDateString = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+                              const isToday = day === ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date().getDay()];
+                              const shouldApplyMask = isToday && isLiveCheckValid(selectedPlace) && selectedPlace.temporaryHoursOverride?.date === todayDateString;
+                              
+                              let hoursStr = '';
+                              if (shouldApplyMask && selectedPlace.temporaryHoursOverride?.todayHours) {
+                                hoursStr = selectedPlace.temporaryHoursOverride.todayHours;
+                              } else if (ranges.length === 0) {
+                                hoursStr = 'סגור';
+                              } else if (ranges.length === 1 && ranges[0].open === 0 && ranges[0].close === 0) {
+                                hoursStr = 'פתוח 24 שעות';
+                              } else {
+                                const formatTime = (m: number) => {
+                                  const h = Math.floor(m / 60);
+                                  const min = m % 60;
+                                  return `${h.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`;
+                                };
+                                hoursStr = ranges.map(r => `${formatTime(r.open)} – ${formatTime(r.close)}`).join(', ');
+                              }
 
-                            return (
-                              <div 
-                                key={day} 
-                                className={cn(
-                                  "flex justify-between text-xs sm:text-sm font-medium py-1.5 px-3 rounded-xl transition-all",
-                                  isToday ? "bg-blue-500/5 text-blue-600 font-bold shadow-sm" : "text-black/60"
-                                )}
-                              >
-                                <span>{dayHe}</span>
-                                <span className="tabular-nums text-left" dir="ltr">{hoursStr}</span>
-                              </div>
-                            );
-                          })
-                      ) : (
-                        (selectedPlace.openingHours as string[])
-                          .filter((day) => {
-                            if (showFullHours) return true;
-                            const todayName = new Date().toLocaleDateString('he-IL', { weekday: 'long' });
-                            return String(day || "").includes(todayName);
-                          })
-                          .map((day, idx) => {
-                            const todayName = new Date().toLocaleDateString('he-IL', { weekday: 'long' });
-                            const dayStr = String(day || "");
-                            const isToday = dayStr.includes(todayName);
-                            const [dayName, hours] = dayStr.split(': ');
-                            
-                            return (
-                              <div 
-                                key={idx} 
-                                className={cn(
-                                  "flex justify-between text-xs sm:text-sm font-medium py-1.5 px-3 rounded-xl transition-all",
-                                  isToday ? "bg-blue-500/5 text-blue-600 font-bold shadow-sm" : "text-black/60"
-                                )}
-                              >
-                                <span>{dayName}</span>
-                                <span className="tabular-nums text-left" dir="ltr">{hours}</span>
-                              </div>
-                            );
-                          })
-                      )}
-                    </div>
-                  ) : (
-                    <p className="text-xs sm:text-sm font-medium text-black/40 text-center py-2 leading-relaxed">
-                      שעות הפתיחה של המקום הזה מסתוריות במיוחד.
-                      <br />
-                      כנראה צריך פשוט להגיע ולבדוק.
-                    </p>
-                  )}
+                              return (
+                                <div 
+                                  key={day} 
+                                  className={cn(
+                                    "flex justify-between text-xs sm:text-sm font-medium py-1.5 px-3 rounded-xl transition-all",
+                                    isToday ? "bg-blue-500/5 text-blue-600 font-bold shadow-sm" : "text-black/60"
+                                  )}
+                                >
+                                  <span>{dayHe}</span>
+                                  <span className="tabular-nums text-left" dir="ltr">{hoursStr}</span>
+                                </div>
+                              );
+                            })
+                        ) : (
+                          (selectedPlace.openingHours as string[])
+                            .filter((day) => {
+                              if (showFullHours) return true;
+                              const todayName = new Date().toLocaleDateString('he-IL', { weekday: 'long' });
+                              return String(day || "").includes(todayName);
+                            })
+                            .map((day, idx) => {
+                              const todayName = new Date().toLocaleDateString('he-IL', { weekday: 'long' });
+                              const dayStr = String(day || "");
+                              const isToday = dayStr.includes(todayName);
+                              const todayDateString = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+                              const shouldApplyMask = isToday && isLiveCheckValid(selectedPlace) && selectedPlace.temporaryHoursOverride?.date === todayDateString;
+                              
+                              const [dayName, hours] = dayStr.split(': ');
+                              const hoursStr = (shouldApplyMask && selectedPlace.temporaryHoursOverride?.todayHours) ? selectedPlace.temporaryHoursOverride.todayHours : hours;
+                              
+                              return (
+                                <div 
+                                  key={idx} 
+                                  className={cn(
+                                    "flex justify-between text-xs sm:text-sm font-medium py-1.5 px-3 rounded-xl transition-all",
+                                    isToday ? "bg-blue-500/5 text-blue-600 font-bold shadow-sm" : "text-black/60"
+                                  )}
+                                >
+                                  <span>{dayName}</span>
+                                  <span className="tabular-nums text-left" dir="ltr">{hoursStr}</span>
+                                </div>
+                              );
+                            })
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs sm:text-sm font-medium text-black/40 text-center py-2 leading-relaxed">
+                        שעות הפתיחה של המקום הזה מסתוריות במיוחד.
+                        <br />
+                        כנראה צריך פשוט להגיע ולבדוק.
+                      </p>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex flex-col gap-4 mt-auto pb-4">
@@ -2267,6 +2471,17 @@ export default function App() {
                             setUserLocation(newLoc);
                             setRefreshTrigger(prev => prev + 1);
                             if (mapRef.current) {
+                              const currentCenter = mapRef.current.getCenter();
+                              const currentZoom = mapRef.current.getZoom();
+                              const latDiff = Math.abs(currentCenter.lat - latitude);
+                              const lngDiff = Math.abs(currentCenter.lng - longitude);
+
+                              if (latDiff < 0.0001 && lngDiff < 0.0001 && currentZoom === 17) {
+                                localStorage.setItem('location_onboarding_done', 'true');
+                                setShowLocationOnboarding(false);
+                                return;
+                              }
+
                               setIsMapAnimating(true);
                               mapRef.current.flyTo(newLoc, 17, {
                                 duration: 2,
