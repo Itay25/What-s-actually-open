@@ -110,7 +110,7 @@ export const BusinessMarker = React.memo(({ place, isActive, zoom, showLabel, la
               backgroundColor: { duration: 0.5 } // Smooth color transition
             }
           }}
-          exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.3 } }}
+          exit={{ opacity: 0, scale: 0.5, transition: { duration: 0.2 } }}
           className="relative flex items-center cursor-pointer pointer-events-auto rounded-full"
           style={{ 
             width: `${size}px`, 
@@ -143,16 +143,9 @@ export const BusinessMarker = React.memo(({ place, isActive, zoom, showLabel, la
                 textShadow: '0 0 4px white, 0 0 4px white, 0 0 4px white, 0 0 4px white, 0 0 8px white' 
               }}
             >
-              <div className="flex items-center gap-1">
-                <span className="text-[13px] font-bold text-black leading-none whitespace-nowrap tracking-tight">
-                  {shortenName(place.name)}
-                </span>
-                {place.isFallback && (
-                  <span className="text-[9px] font-medium text-blue-600 bg-blue-50 px-1 rounded border border-blue-200">
-                    בקרבת מקום
-                  </span>
-                )}
-              </div>
+              <span className="text-[13px] font-bold text-black leading-none whitespace-nowrap tracking-tight">
+                {shortenName(place.name)}
+              </span>
               {labelType === 'full' && (
                 <span className="text-[10px] font-medium text-gray-600 leading-tight whitespace-nowrap mt-0.5">
                   {place.category}
