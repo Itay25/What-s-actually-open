@@ -36,6 +36,35 @@ export interface NormalizedOpeningHours {
   Saturday?: TimeRange[];
 }
 
+export interface LiveCheckResult {
+  finalStatus: 'OPEN' | 'CLOSED' | 'CLOSING_SOON' | 'UNCERTAIN';
+  aiStatus: string;
+  confidence: number;
+  specialCase: string;
+  reason: string;
+  report?: string;
+  reliability?: 'High' | 'Medium' | 'Low';
+  sourcesUsed?: string[];
+  checkedAt: number;
+  todayHours?: string;
+  temporaryHoursOverride?: {
+    date: string;
+    todayHours?: string;
+    finalStatus: 'OPEN' | 'CLOSED' | 'CLOSING_SOON' | 'UNCERTAIN';
+    reason: string;
+  };
+  addressMatch?: boolean;
+  enrichedData?: {
+    phoneNumber: string | null;
+    websiteUrl: string | null;
+    googleMapsUrl: string | null;
+    rating: number | null;
+    totalReviews: number | null;
+    imageUrl: string | null;
+    openingHours: string | null;
+  };
+}
+
 export interface Place {
   id: string;
   place_id?: string;
@@ -50,6 +79,7 @@ export interface Place {
   confirmations: number;
   officialOpen: boolean;
   address?: string;
+  city?: string;
   rating?: number;
   userRatingsTotal?: number;
   photo_reference?: string;
@@ -76,6 +106,8 @@ export interface Place {
   lastReportedOpen?: number;
   lastReportedClosed?: number;
   lastReportTime?: number;
+  isSubordinate?: boolean;
+  subordinateIndex?: number;
   _hasImage?: boolean;
   _hasHours?: boolean;
   userReports?: {
@@ -84,6 +116,13 @@ export interface Place {
     userId: string;
     userPhoto?: string;
   }[];
+  liveCheckResult?: LiveCheckResult;
+  temporaryHoursOverride?: {
+    date: string;
+    todayHours?: string;
+    finalStatus: 'OPEN' | 'CLOSED' | 'CLOSING_SOON' | 'UNCERTAIN';
+    reason: string;
+  };
 }
 
 export interface Category {
@@ -118,6 +157,7 @@ export interface UserProfile {
   unlockedRewards?: string[];
   activeRewards?: string[];
   rewardSettings?: RewardSettings;
+  liveCheckUsageToday?: number;
 }
 
 export interface CommunityReport {
