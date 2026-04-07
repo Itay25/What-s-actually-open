@@ -58,7 +58,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
       return;
     }
 
-    // Local search after 300ms
+    // Local search after 600ms (Debounced for cost optimization)
     const localTimer = setTimeout(async () => {
       setIsSearching(true);
       try {
@@ -118,7 +118,7 @@ export const Search: React.FC<SearchProps> = React.memo(({ onSelect, onFocus, us
           setIsApiSearching(false);
         }
       }
-    }, 3000);
+    }, 1000);
 
     return () => {
       clearTimeout(localTimer);
