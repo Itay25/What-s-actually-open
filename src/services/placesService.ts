@@ -469,6 +469,60 @@ export async function getPlaceById(id: string): Promise<Place | null> {
 }
 
 /**
+ * Manually updates the local cache for a specific place.
+ * This ensures immediate UI updates after a user action (report/live check).
+ */
+export function updateLocalCache(updatedPlace: Place) {
+  const now = Date.now();
+
+  // 1. Update placeDetailsCache
+  placeDetailsCache.set(updatedPlace.id, { place: updatedPlace, timestamp: now });
+
+  // 2. Update cachedAllPlaces
+  if (cachedAllPlaces) {
+    const index = cachedAllPlaces.findIndex(p => p.id === updatedPlace.id);
+    if (index !== -1) {
+      cachedAllPlaces[index] = { ...cachedAllPlaces[index], ...updatedPlace };
+    }
+  }
+
+  // 3. Update dbCache (iterate through all cached bound results)
+  dbCache.forEach((cacheEntry, key) => {
+    const index = cacheEntry.places.findIndex(p => p.id === updatedPlace.id);
+    if (index !== -1) {
+      const updatedPlaces = [...cacheEntry.places];
+      updatedPlaces[index] = { ...updatedPlaces[index], ...updatedPlace };
+      dbCache.set(key, { places: updatedPlaces, timestamp: now });
+    }
+  });
+
+  // 4. Update searchCache
+  searchCache.forEach((cacheEntry, key) => {
+    const index = cacheEntry.results.findIndex(p => p.id === updatedPlace.id);
+    if (index !== -1) {
+      const updatedResults = [...cacheEntry.results];
+      updatedResults[index] = { ...updatedResults[index], ...updatedPlace };
+      searchCache.set(key, { results: updatedResults, timestamp: now });
+    }
+  });
+
+  logger.debug(`Local cache updated for place: ${updatedPlace.name} (${updatedPlace.id})`);
+}
+
+/**
+ * Clears all in-memory caches to prevent data bleeding between user sessions.
+ */
+export function clearAllCaches() {
+  dbCache.clear();
+  searchCache.clear();
+  placeDetailsCache.clear();
+  inFlightRequests.clear();
+  cachedAllPlaces = null;
+  lastAllPlacesFetch = 0;
+  logger.info("All in-memory caches cleared successfully.");
+}
+
+/**
  * Helper to save a place to Firestore.
  */
 async function savePlaceToDB(place: Place) {
