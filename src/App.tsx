@@ -6,7 +6,7 @@ import { MOCK_PLACES, CATEGORIES } from './constants';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   MapPin, Users, Clock, ShieldAlert, Navigation, 
-  CheckCircle2, XCircle, HelpCircle, Phone,
+  CheckCircle2, XCircle, HelpCircle, Phone, Calendar,
   ShoppingCart, Store, Coffee, Utensils, PlusSquare, Fuel, Pill,
   Search,
   ThumbsUp,
@@ -33,7 +33,7 @@ import { validateBusinessStatus, mapValidationToStatus } from './services/valida
 import { isPlaceIncomplete } from './utils/placeIncomplete';
 import { Search as SearchComponent } from './components/Search';
 import logger from './utils/logger';
-import { discoverPlaces, searchPlaces, getPlaceById } from './services/placesService';
+import { discoverPlaces, searchPlaces, getPlaceById, updateLocalCache, clearAllCaches } from './services/placesService';
 import { BusinessMarker } from './components/BusinessMarker';
 import { MapDiscovery } from './components/MapDiscovery';
 import { RewardActionButton } from './components/RewardActionButton';
@@ -214,17 +214,35 @@ const PlacePlaceholder = React.memo(({ category }: { category: string }) => {
   else if (category.includes('אטרקציות')) placeholder = PLACEHOLDERS['אטרקציות'];
   
   return (
-    <div className="flex flex-col items-center justify-center gap-4 text-center p-8 w-full h-full">
-      <motion.div 
-        initial={{ scale: 0.8, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        className={cn("w-20 h-20 rounded-3xl flex items-center justify-center mb-2 shadow-sm", placeholder.color)}
-      >
-        {placeholder.icon}
-      </motion.div>
-      <div className="flex flex-col gap-1.5">
-        <span className="text-base font-bold text-black/80">{placeholder.title}</span>
-        <span className="text-xs font-medium text-black/40 max-w-[200px] leading-relaxed italic">"{placeholder.caption}"</span>
+    <div className="relative flex flex-col items-center justify-center p-4 sm:p-8 w-full h-full bg-slate-50 rounded-[28px] overflow-hidden border border-black/5 shadow-inner">
+      {/* Background container ensures blobs don't leak */}
+      <div className="absolute inset-0 overflow-hidden rounded-[28px]">
+        {/* Animated blobs - smaller blur and area for mobile */}
+        <motion.div animate={{ rotate: 360 }} transition={{ duration: 40, repeat: Infinity, ease: "linear" }} className="absolute -top-16 -right-16 w-56 h-56 bg-white/60 rounded-full blur-2xl" />
+        <motion.div animate={{ rotate: -360 }} transition={{ duration: 30, repeat: Infinity, ease: "linear" }} className={cn("absolute -bottom-16 -left-16 w-56 h-56 rounded-full blur-2xl opacity-30", placeholder.color.split(' ')[0])} />
+      </div>
+
+
+      {/* Visual Content Block - uses items-center justify-center for optical center */}
+      <div className="relative z-10 flex flex-col items-center justify-center gap-1.5 sm:gap-4 pb-4 sm:pb-0 pl-10 sm:pl-0">
+
+        {/* Floating Icon Box (Scaled down for mobile to avoid button overlap) */}
+        <motion.div
+          animate={{ y: [0, -6, 0] }}
+          transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
+          className={cn("relative z-10 w-12 h-12 sm:w-20 sm:h-20 rounded-[18px] sm:rounded-3xl flex items-center justify-center shadow-sm border border-black/5 bg-white", placeholder.color.split(' ')[1])}
+        >
+          <div className="scale-[0.65] sm:scale-100 flex items-center justify-center">
+            {placeholder.icon}
+          </div>
+        </motion.div>
+
+        {/* Text Content in English - Smaller on mobile to avoid overlap */}
+        <div className="relative z-10 flex flex-col gap-0.5 text-center px-2">
+          <span className="text-[11px] sm:text-base font-bold text-black/80 leading-tight">{placeholder.title}</span>
+          <span className="text-[9px] sm:text-xs font-medium text-black/30 max-w-[130px] sm:max-w-[220px] leading-relaxed italic">"{placeholder.caption}"</span>
+        </div>
+
       </div>
     </div>
   );
@@ -619,6 +637,7 @@ export default function App() {
   const performLogout = useCallback(async () => {
     try {
       await signOut(auth);
+      clearAllCaches();
       setShowLogoutConfirm(false);
     } catch (error) {
       logger.error("Logout failed:", error);
@@ -984,7 +1003,7 @@ export default function App() {
             userId: user.uid,
             userPhoto: user.photoURL || undefined
           }];
-          return { 
+          const updated = { 
             ...p, 
             userReports: newReports,
             reportsOpen: (p.reportsOpen || 0) + (status === 'open' ? 1 : 0),
@@ -993,6 +1012,8 @@ export default function App() {
             lastReportedClosed: status === 'closed' ? Date.now() : p.lastReportedClosed,
             lastReportTime: Date.now()
           };
+          updateLocalCache(updated);
+          return updated;
         }
         return p;
       };
@@ -1668,10 +1689,7 @@ export default function App() {
                 <motion.div 
                   whileHover={{ scale: 1.01 }}
                   whileTap={{ scale: 0.99 }}
-                  className={cn(
-                    "w-full h-44 sm:h-56 rounded-[28px] overflow-hidden bg-white relative shadow-sm border border-black/5 cursor-pointer flex items-center justify-center group",
-                    (!selectedPlace.imageUrl || imageError) && "pb-12"
-                  )}
+                  className="w-full h-44 sm:h-56 rounded-[28px] overflow-hidden bg-white relative shadow-sm border border-black/5 cursor-pointer flex items-center justify-center group"
                 >
                   {(!selectedPlace.imageUrl || imageError) ? (
                     <PlacePlaceholder category={selectedPlace.category} />
@@ -1709,6 +1727,7 @@ export default function App() {
                         temporaryHoursOverride: result.temporaryHoursOverride
                       } : null;
                       setSelectedPlace(updatedPlace);
+                      if (updatedPlace) updateLocalCache(updatedPlace);
                       
                       const updateList = (prev: Place[]) => prev.map(p => p.id === selectedPlace?.id ? { 
                         ...p, 
@@ -1728,28 +1747,99 @@ export default function App() {
               </div>
 
               <div className="p-4 sm:p-8 pt-6">
-                <div className="flex justify-between items-start mb-6 sm:mb-8">
-                  <div className="max-w-[80%]">
-                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight mb-1.5 leading-tight text-black">{selectedPlace.name}</h2>
-                    <p className="text-xs sm:text-sm text-black/50 font-medium flex items-center gap-1.5">
-                      <MapPin size={14} className="opacity-40" />
+                <div className="flex justify-between items-start mb-2 gap-4">
+                  <div className="flex-1 min-w-0">
+                    <h2 className="text-2xl sm:text-3xl font-bold tracking-tight mb-1.5 leading-tight text-black break-words">{selectedPlace.name}</h2>
+                    <p className="text-xs sm:text-sm text-black/50 font-medium flex items-start gap-1.5">
+                      <MapPin size={14} className="opacity-40 shrink-0 mt-[3px]" />
                       {selectedPlace.address || (
                         <span className="text-[11px] sm:text-xs leading-relaxed block mt-1 opacity-70 font-normal">
                           לא הצלחנו למצוא כתובת למקום הזה.
                         </span>
                       )}
                     </p>
-                    {( (isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.rating) || selectedPlace.rating) && (
-                      <div className="flex items-center gap-1 mt-1">
-                        <Star size={12} className="text-amber-400 fill-amber-400" />
-                        <span className="text-xs font-bold text-black/70">
-                          {(isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.rating) || selectedPlace.rating}
-                        </span>
-                        <span className="text-[10px] text-black/40 font-medium">
-                          ({(isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.enrichedData?.totalReviews) || selectedPlace.userRatingsTotal || 0} ביקורות)
-                        </span>
-                      </div>
-                    )}
+                    {(() => {
+                      const enriched = selectedPlace.liveCheckResult?.enrichedData;
+                      const rating = enriched?.rating || selectedPlace.rating;
+                      const totalReviews = enriched?.totalReviews || selectedPlace.userRatingsTotal || 0;
+                      
+                      const phone = enriched?.phoneNumber || selectedPlace.phoneNumber;
+                      const website = enriched?.websiteUrl || selectedPlace.websiteUrl;
+                      const ontopo = enriched?.ontopoUrl;
+                      const reviews = enriched?.reviewsUrl;
+
+                      if (!rating && !phone && !website && !ontopo && !reviews) return null;
+
+                      return (
+                        <div className="flex flex-row flex-wrap justify-between items-center mt-3 w-full gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {rating && (
+                              <div className="flex items-center gap-1 bg-black/[0.03] px-2.5 py-1.5 rounded-full border border-black/[0.05]">
+                                <Star size={12} className="text-amber-400 fill-amber-400" />
+                                <span className="text-xs font-bold text-black/70">
+                                  {rating}
+                                </span>
+                                {totalReviews > 0 && (
+                                  <span className="text-[10px] text-black/40 font-medium">
+                                    ({totalReviews})
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                            {phone && (
+                              <a 
+                                href={`tel:${phone}`}
+                                className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/20 rounded-full text-green-700 hover:bg-green-500/20 transition-all active:scale-95"
+                                title="התקשר"
+                              >
+                                <Phone size={14} />
+                                <span className="text-[11px] font-bold">שיחה</span>
+                              </a>
+                            )}
+
+                            {website && (
+                              <a 
+                                href={website}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-full text-blue-700 hover:bg-blue-500/20 transition-all active:scale-95"
+                                title="אתר"
+                              >
+                                <Globe size={14} />
+                                <span className="text-[11px] font-bold">אתר</span>
+                              </a>
+                            )}
+
+                            {ontopo && (
+                              <a 
+                                href={ontopo}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 px-3 py-1.5 bg-purple-500/10 border border-purple-500/20 rounded-full text-purple-700 hover:bg-purple-500/20 transition-all active:scale-95"
+                                title="הזמן מקום"
+                              >
+                                <Calendar size={14} />
+                                <span className="text-[11px] font-bold">הזמנה</span>
+                              </a>
+                            )}
+
+                            {reviews && (
+                              <a 
+                                href={reviews}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-2 px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-full text-amber-700 hover:bg-amber-500/20 transition-all active:scale-95"
+                                title="ביקורות"
+                              >
+                                <Star size={14} />
+                                <span className="text-[11px] font-bold">ביקורות</span>
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                   <button 
                     onClick={() => {
@@ -1905,7 +1995,7 @@ export default function App() {
                   </motion.div>
                 </AnimatePresence>
 
-                {/* Uncertain UX & Enriched Data */}
+                {/* Uncertain UX */}
                 {isLiveCheckValid(selectedPlace) && selectedPlace.liveCheckResult?.finalStatus === 'UNCERTAIN' && (
                   <div className="mb-6 sm:mb-8 p-6 bg-orange-50 rounded-[28px] border border-orange-100 flex flex-col gap-4">
                     <div className="flex items-center gap-3 text-orange-700">
@@ -1914,35 +2004,8 @@ export default function App() {
                       </div>
                       <div className="flex flex-col">
                         <span className="text-sm font-bold">לא מצאנו שעות ודאיות ברשת להיום.</span>
-                        <span className="text-[11px] opacity-70">מומלץ להתקשר לעסק לוודא זמינות:</span>
+                        <span className="text-[11px] opacity-70">מומלץ לוודא זמינות מול העסק לפני ההגעה.</span>
                       </div>
-                    </div>
-                    
-                    <div className="flex flex-col gap-2">
-                      {selectedPlace.liveCheckResult.enrichedData?.phoneNumber && (
-                        <div className="flex flex-col gap-2">
-                          <span className="text-xs font-medium text-orange-800/60">מומלץ לוודא טלפונית לפני ההגעה:</span>
-                          <a 
-                            href={`tel:${selectedPlace.liveCheckResult.enrichedData.phoneNumber}`}
-                            className="w-full bg-white border border-orange-200 text-orange-600 py-3 rounded-2xl text-lg font-black flex items-center justify-center gap-3 shadow-sm active:scale-95 transition-all hover:bg-orange-50"
-                          >
-                            <Phone size={20} />
-                            {selectedPlace.liveCheckResult.enrichedData.phoneNumber}
-                          </a>
-                        </div>
-                      )}
-                      
-                      {selectedPlace.liveCheckResult.enrichedData?.googleMapsUrl && (
-                        <a 
-                          href={selectedPlace.liveCheckResult.enrichedData.googleMapsUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="w-full bg-white/50 border border-orange-200/50 text-orange-700/60 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-all"
-                        >
-                          <Globe size={14} />
-                          בדוק ביקורות אחרונות בגוגל
-                        </a>
-                      )}
                     </div>
                   </div>
                 )}
