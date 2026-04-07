@@ -12,9 +12,9 @@ interface LiveCheckButtonProps {
   city?: string;
   address?: string;
   openingHours?: any;
-  dailyLimitReached?: boolean;
   lastCheckedAt?: number;
   onResult?: (result: LiveCheckResult) => void;
+  dailyLimitReached?: boolean;
 }
 
 const LOADING_PHRASES = [
@@ -31,9 +31,9 @@ export const LiveCheckButton = ({
   city,
   address,
   openingHours,
-  dailyLimitReached = false,
   lastCheckedAt,
-  onResult
+  onResult,
+  dailyLimitReached = false
 }: LiveCheckButtonProps) => {
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [apiResponse, setApiResponse] = useState<LiveCheckResult | null>(null);
@@ -57,14 +57,11 @@ export const LiveCheckButton = ({
     return () => clearInterval(interval);
   }, [status]);
 
-  // 4. Lock/Hide Logic
-  if (dailyLimitReached) return null;
-
   const isRecentlyChecked = isLiveCheckValid({ id: placeId, liveCheckResult: { checkedAt: lastCheckedAt } } as any);
 
   const handleCheck = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (status === 'loading' || status === 'success' || isRecentlyChecked) return;
+    if (status === 'loading' || status === 'success' || isRecentlyChecked || dailyLimitReached) return;
 
     setStatus('loading');
     
@@ -88,7 +85,8 @@ export const LiveCheckButton = ({
       });
 
       if (response.status === 429) {
-        throw new Error('DAILY_LIMIT_REACHED');
+        setStatus('idle');
+        return;
       }
 
       if (!response.ok) {
@@ -112,16 +110,16 @@ export const LiveCheckButton = ({
   return (
     <button
       onClick={handleCheck}
-      disabled={status === 'loading' || status === 'success' || !!isRecentlyChecked}
+      disabled={status === 'loading' || status === 'success' || !!isRecentlyChecked || dailyLimitReached}
       className={cn(
         "absolute bottom-3 left-3 flex-shrink-0 border backdrop-blur-md transition-all duration-300 ease-in-out flex flex-col items-center justify-center gap-0.5 overflow-hidden shadow-[0_4px_12px_rgba(0,0,0,0.05)]",
         status === 'loading' 
           ? "h-12 px-4 min-w-[140px] rounded-full" 
           : "h-12 md:h-14 min-w-max px-4 rounded-full",
         // Neutral Status Colors
-        status === 'idle' && !isRecentlyChecked ? "bg-white/50 hover:bg-white/70 active:scale-95 cursor-pointer border-white/30" : 
+        status === 'idle' && !isRecentlyChecked && !dailyLimitReached ? "bg-white/50 hover:bg-white/70 active:scale-95 cursor-pointer border-white/30" : 
         status === 'loading' ? "bg-white/30 cursor-default border-white/20" :
-        (status === 'success' || isRecentlyChecked) ? "bg-gray-100/50 border-gray-300/30 cursor-not-allowed opacity-80" :
+        (status === 'success' || isRecentlyChecked || dailyLimitReached) ? "bg-gray-100/50 border-gray-300/30 cursor-not-allowed opacity-80" :
         "bg-red-50/50 cursor-pointer border-red-500/30",
         !hasImage && "bottom-4 left-4"
       )}
@@ -138,6 +136,8 @@ export const LiveCheckButton = ({
             <AlertCircle size={15} className="text-red-500" />
           ) : (status === 'success' || isRecentlyChecked) ? (
             <Clock size={15} className="text-gray-400" />
+          ) : dailyLimitReached ? (
+            <HelpCircle size={15} className="text-gray-400" />
           ) : (
             <Sparkles size={15} className={cn(
               "transition-colors duration-500",
@@ -167,7 +167,10 @@ export const LiveCheckButton = ({
               status === 'error' ? "text-red-600" : "text-black/70"
             )}
           >
-            {status === 'idle' && (isRecentlyChecked ? "נבדק לאחרונה" : "בדיקה בזמן אמת")}
+            {status === 'idle' && (
+              dailyLimitReached ? "מכסה יומית נוצלה" :
+              isRecentlyChecked ? "נבדק לאחרונה" : "בדיקה בזמן אמת"
+            )}
             {status === 'loading' && LOADING_PHRASES[phraseIndex]}
             {status === 'success' && "נבדק לאחרונה"}
             {status === 'error' && "שגיאה"}
