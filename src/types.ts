@@ -58,6 +58,8 @@ export interface LiveCheckResult {
     phoneNumber: string | null;
     websiteUrl: string | null;
     googleMapsUrl: string | null;
+    reviewsUrl: string | null;
+    ontopoUrl: string | null;
     rating: number | null;
     totalReviews: number | null;
     imageUrl: string | null;
