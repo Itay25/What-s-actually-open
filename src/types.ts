@@ -83,6 +83,8 @@ export interface Place {
   address?: string;
   city?: string;
   rating?: number;
+  websiteUrl?: string;
+  phoneNumber?: string;
   userRatingsTotal?: number;
   photo_reference?: string;
   photo_url?: string;
