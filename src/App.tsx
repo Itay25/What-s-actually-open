@@ -1719,6 +1719,7 @@ export default function App() {
                     placeName={selectedPlace.name}
                     city={selectedPlace.city}
                     address={selectedPlace.address}
+                    websiteUrl={selectedPlace.websiteUrl}
                     openingHours={selectedPlace.openingHours}
                     onResult={(result) => {
                       const updatedPlace = selectedPlace ? { 
