@@ -11,6 +11,7 @@ interface LiveCheckButtonProps {
   placeName: string;
   city?: string;
   address?: string;
+  websiteUrl?: string;
   openingHours?: any;
   lastCheckedAt?: number;
   onResult?: (result: LiveCheckResult) => void;
@@ -30,6 +31,7 @@ export const LiveCheckButton = ({
   placeName,
   city,
   address,
+  websiteUrl,
   openingHours,
   lastCheckedAt,
   onResult,
@@ -78,6 +80,7 @@ export const LiveCheckButton = ({
           placeName,
           city,
           address,
+          websiteUrl,
           openingHours,
           userId,
           email
@@ -168,7 +171,7 @@ export const LiveCheckButton = ({
             )}
           >
             {status === 'idle' && (
-              dailyLimitReached ? "מכסה יומית נוצלה" :
+              dailyLimitReached ? "נבדק לאחרונה" :
               isRecentlyChecked ? "נבדק לאחרונה" : "בדיקה בזמן אמת"
             )}
             {status === 'loading' && LOADING_PHRASES[phraseIndex]}
