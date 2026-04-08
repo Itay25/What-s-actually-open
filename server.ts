@@ -6,11 +6,14 @@ import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import axios from "axios";
 import OpenAI from "openai";
+import Parser from "rss-parser";
 import "dotenv/config";
 import logger from "./src/utils/logger";
 import { LiveCheckResult } from "./src/types";
+import { buildDynamicIsraeliContext } from "./src/services/contextService";
 import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
-import fs from "fs"; // הוחזר מהקובץ המקורי עבור קריאת הקובץ הלוקאלי
+import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
+import fs from "fs"; // מנגנון קריאת הקובץ הלוקאלי
 
 // Lazy initialization for Firebase Admin
 let dbInstance: admin.firestore.Firestore | null = null;
@@ -24,7 +27,7 @@ function getDb() {
 
         let credential;
 
-        // בדיקה: האם אנחנו ב-Render? (משתמשים במשתנה סביבה) - הוחזר מהקובץ המקורי
+        // בדיקה: האם אנחנו ב-Render? (משתמשים במשתנה סביבה)
         if (process.env.FIREBASE_SERVICE_ACCOUNT) {
           logger.info("Loading credentials from Environment Variable (Render Mode)");
           const serviceAccountValue = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -489,78 +492,57 @@ async function startServer() {
     }
   });
 
-  // API Route for Emergency Status (Server-side to bypass CORS)
+  const parser = new Parser();
+
+  let cachedEmergencyStatus: any = null;
+  let lastEmergencyCheck = 0;
+  const EMERGENCY_CACHE_TTL = 12 * 60 * 60 * 1000; // 12 hours
+
+  // API Route for Emergency Status (Server-side to bypass CORS) - AI Improved version
   app.get("/api/emergency-status", async (req, res) => {
     try {
-      // 1. Check for current active alerts
-      const activeResponse = await axios.get('https://www.oref.org.il/WarningMessages/alert/alerts.json', {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-          'Referer': 'https://www.oref.org.il/',
-          'X-Requested-With': 'XMLHttpRequest'
-        },
-        validateStatus: () => true // Don't throw on non-2xx
-      });
+      const now = Date.now();
+      if (cachedEmergencyStatus && (now - lastEmergencyCheck < EMERGENCY_CACHE_TTL)) {
+        return res.json(cachedEmergencyStatus);
+      }
+
+      const feed = await parser.parseURL('http://www.ynet.co.il/Integration/StoryRss1854.xml');
+      const items = feed.items.slice(0, 25);
       
-      let isActive = false;
-      let operationName = "חרבות ברזל"; // Default for current context
-
-      if (activeResponse.status !== 204 && activeResponse.status >= 200 && activeResponse.status < 300) {
-        const activeData = activeResponse.data;
-        if (Array.isArray(activeData) && activeData.length > 0) {
-          isActive = true;
+      // מילות מפתח שמעידות על שיבוש שגרה ממשי
+      const keywords = ['החמרת הנחיות', 'הגבלות התקהלות', 'סגירת עסקים', 'ביטול לימודים', 'מטח כבד', 'מתקפת טילים', 'הנחיות מיוחדות'];
+      
+      let keywordCount = 0;
+      const combinedText = items.map(item => (item.title || '') + ' ' + (item.contentSnippet || '')).join(' ');
+      
+      keywords.forEach(keyword => {
+        if (combinedText.includes(keyword)) {
+          keywordCount++;
         }
-      }
+      });
 
-      // 2. If no active alerts, check history for recent activity (last 24h)
-      if (!isActive) {
-        const historyResponse = await axios.get('https://www.oref.org.il/WarningMessages/History/AlertsHistory.json', {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Referer': 'https://www.oref.org.il/',
-            'X-Requested-With': 'XMLHttpRequest'
-          },
-          validateStatus: () => true
-        });
+      // דורש לפחות מילה אחת של שיבוש שגרה ברור, או הרבה מילים כלליות
+      const isActive = keywordCount >= 1 || (combinedText.match(/פיקוד העורף/g) || []).length >= 3;
+      const operationName = process.env.CURRENT_OPERATION || "חרבות ברזל";
 
-        if (historyResponse.status >= 200 && historyResponse.status < 300) {
-          const historyData = historyResponse.data;
-          if (Array.isArray(historyData)) {
-            const now = new Date();
-            const twentyFourHoursAgo = new Date(now.getTime() - (24 * 60 * 60 * 1000));
-            
-            // Count alerts in the last 24 hours
-            const recentAlerts = historyData.filter((alert: any) => {
-              const alertDate = new Date(alert.alertDate);
-              return alertDate > twentyFourHoursAgo;
-            });
-
-            if (recentAlerts.length > 10) {
-              isActive = true;
-            }
-          }
-        }
-      }
-
-      // 3. Fallback: If we are in a known conflict period (e.g. 2023-2026)
-      // This ensures the app stays in emergency mode during prolonged conflicts even if quiet for 24h.
-      const currentYear = new Date().getFullYear();
-      if (currentYear >= 2023 && currentYear <= 2026) {
-        isActive = true;
-      }
-
-      res.json({
+      cachedEmergencyStatus = {
         active: isActive,
         operationName: isActive ? operationName : null,
         message: isActive ? "בשל המצב הביטחוני הנוכחי, דיוק סטטוס המקומות עלול להיות מושפע." : null
-      });
+      };
+      lastEmergencyCheck = now;
+
+      res.json(cachedEmergencyStatus);
     } catch (error) {
       logger.error("Emergency Status Error:", error);
+      if (cachedEmergencyStatus) {
+        return res.json(cachedEmergencyStatus);
+      }
       res.json({ active: false });
     }
   });
 
-  // API Route for Emergency Alerts (Server-side to bypass CORS) - הוחזר מהקובץ המקורי
+  // API Route for Emergency Alerts (Server-side to bypass CORS) - Local version (Oref Proxy)
   app.get("/api/emergency-alerts", async (req, res) => {
     try {
       // Using the official Home Front Command (Oref) API
@@ -606,266 +588,303 @@ async function startServer() {
     }
   });
 
-// --- API Route for Live Check (Production: AI Separation of Concerns) ---
-app.post("/live-check", async (req, res) => {
-  try {
-    const { placeId, placeName, city, address, openingHours, userId, email } = req.body;
+  // --- API Route for Live Check (Production: AI Separation of Concerns) ---
+  app.post("/live-check", async (req, res) => {
+    try {
+      const { placeId, placeName, city, address, websiteUrl, openingHours, userId, email } = req.body;
 
-    if (!placeName) return res.status(400).json({ error: "Missing placeName" });
+      if (!placeName) return res.status(400).json({ error: "Missing placeName" });
 
-    // 1. Cache Logic
-    const cacheKey = `${placeName}-${address || city || ''}`.toLowerCase().trim();
-    const now = Date.now();
-    const cached = liveCheckCache.get(cacheKey);
+      // 1. Cache Logic
+      const cacheKey = `${placeName}-${address || city || ''}`.toLowerCase().trim();
+      const now = Date.now();
+      const cached = liveCheckCache.get(cacheKey);
 
-    if (cached && (now - cached.timestamp < 30 * 60 * 1000)) {
-      logger.info(`Cache hit for: ${placeName}`);
-      return res.json(cached.data);
-    }
-
-    // 2. Time Logic & Constants (Calculated early for rate limiting)
-    const israelTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' });
-    const israelTime = new Date(israelTimeStr);
-    const currentDate = israelTime.toISOString().split('T')[0];
-    const currentMinutes = israelTime.getHours() * 60 + israelTime.getMinutes();
-    
-    // Time Injection for Prompts
-    const currentHour = israelTime.getHours().toString().padStart(2, '0');
-    const currentMinuteStr = israelTime.getMinutes().toString().padStart(2, '0');
-    const timeInjection = `The CURRENT LOCAL TIME in Israel is exactly ${currentHour}:${currentMinuteStr}. Evaluate the real-time status strictly based on this local time.`;
-
-    // 2.5 Rate Limiting (Per User) - Admin Bypass
-    const isAdmin = email === "itay8090100@gmail.com";
-    if (userId && !isAdmin) {
-      const db = getDb();
-      if (db) {
-        const usageRef = db.collection("userLiveCheckUsage").doc(`${userId}_${currentDate}`);
-        const usageDoc = await usageRef.get();
-        const count = usageDoc.exists ? usageDoc.data()?.count || 0 : 0;
-
-        if (count >= 3) {
-          logger.warn(`User ${userId} reached daily live-check limit.`);
-          return res.status(429).json({ error: "DAILY_LIMIT_REACHED" });
-        }
-
-        await usageRef.set({
-          count: admin.firestore.FieldValue.increment(1),
-          lastChecked: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
+      if (cached && (now - cached.timestamp < 30 * 60 * 1000)) {
+        logger.info(`Cache hit for: ${placeName}`);
+        return res.json(cached.data);
       }
-    }
 
-    logger.info(`Performing fresh agentic live check for: ${placeName}`);
+      // 2. Time Logic & Constants (Calculated early for rate limiting)
+      const israelTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' });
+      const israelTime = new Date(israelTimeStr);
+      const currentDate = israelTime.toISOString().split('T')[0];
+      const currentMinutes = israelTime.getHours() * 60 + israelTime.getMinutes();
+      
+      // Time Injection for Prompts
+      const currentHour = israelTime.getHours().toString().padStart(2, '0');
+      const currentMinuteStr = israelTime.getMinutes().toString().padStart(2, '0');
+      const timeInjection = `The CURRENT LOCAL TIME in Israel is exactly ${currentHour}:${currentMinuteStr}. Evaluate the real-time status strictly based on this local time.`;
 
-    // STEP 1: PERPLEXITY CALL (The Researcher)
-    const perplexityResponse = await perplexityClient.chat.completions.create({
-      model: "sonar",
-      messages: [
-        {
-          role: "system",
-          content: `You are an elite Israeli web researcher. Search the web (Facebook, Easy.co.il, official municipal sites, Home Front Command) for the exact operating hours and status of the provided business for TODAY in Israel. Deeply search for: Phone number, Google Maps URL, Reviews URL, Ontopo URL (if applicable), and a high-quality Image URL. Search explicitly for the GOOGLE MAPS rating (out of 5 stars). Do NOT use Easy.co.il or 10-point scale ratings. For 'reviewsUrl', you MUST ONLY provide the direct URL to the GOOGLE MAPS REVIEWS for this place. Do NOT provide links to Ontopo, Rest, Easy, or any other review site. If you cannot find the Google Maps review link, return null. Write a detailed 1-2 paragraph summary in Hebrew. Mention if it's closed due to security situations, holidays, or just normal hours. CRITICAL: Do NOT just return generic day-of-the-week hours. You MUST verify if there is a specific update, early closure, or exact hours for the EXACT DATE provided. Pay attention to early closure times. If the business closes earlier today than a normal day, report the exact early closing hour. ${timeInjection} DO NOT output JSON. Just pure informative text.`
-        },
-        {
-          role: "user",
-          content: `Name: ${placeName}, Address: ${address || city}, City: ${city}. Today is ${currentDate}.`
+      // 2.5 Rate Limiting (Per User) - Admin Bypass
+      const isAdmin = email === "itay8090100@gmail.com";
+      if (userId && !isAdmin) {
+        const db = getDb();
+        if (db) {
+          const usageRef = db.collection("userLiveCheckUsage").doc(`${userId}_${currentDate}`);
+          const usageDoc = await usageRef.get();
+          const count = usageDoc.exists ? usageDoc.data()?.count || 0 : 0;
+
+          if (count >= 3) {
+            logger.warn(`User ${userId} reached daily live-check limit.`);
+            return res.status(429).json({ error: "DAILY_LIMIT_REACHED" });
+          }
+
+          await usageRef.set({
+            count: admin.firestore.FieldValue.increment(1),
+            lastChecked: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
         }
-      ]
-    });
+      }
 
-    const rawResearchText = perplexityResponse.choices?.[0]?.message?.content || "";
-    logger.info("=== RAW RESEARCH TEXT ===");
-    logger.info(rawResearchText);
-    logger.info("=========================");
+      logger.info(`Performing fresh agentic live check for: ${placeName}`);
 
-    // STEP 2: OPENAI CALL (The Judge)
-    const judgeResponse = await openaiClient.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a logic engine. You will receive raw web research about an Israeli business, the static opening hours, and the current time. ${timeInjection} Your job is to output a STRICT JSON object representing the real-time status.
+      let targetWebsite = "No official website provided.";
+      let siteSearchCommand = "";
+      if (websiteUrl) {
+        try {
+          const urlString = websiteUrl.startsWith('http') ? websiteUrl : `https://${websiteUrl}`;
+          const hostname = new URL(urlString).hostname;
+          targetWebsite = `PRIORITY TARGET: ${websiteUrl}`;
+          siteSearchCommand = `CRITICAL: You MUST use the search operator 'site:${hostname}' in your internal search queries to explicitly search inside their official domain for holiday tables, branches ("סניפים"), or news.`;
+        } catch (e) {
+          logger.warn(`Failed to parse websiteUrl: ${websiteUrl}`);
+        }
+      }
+
+      const dynamicContext = await buildDynamicIsraeliContext();
+
+      // STEP 1: PERPLEXITY CALL (The Researcher)
+      const perplexityResponse = await perplexityClient.chat.completions.create({
+        model: "sonar",
+        messages: [
+          {
+            role: "system",
+            content: `You are an elite Israeli web data extractor. Search the web explicitly for the operating hours of the provided business for TODAY.
+${timeInjection}
+${dynamicContext}
+
+YOUR MISSION:
+1. ${targetWebsite}
+2. ${siteSearchCommand}
+3. If the official site yields no explicit results for today's specific date/holiday, expand your search to Facebook, Instagram, and local directories.
+4. Extract raw text/rows if you find exact hours or an announcement for TODAY (or the specific holiday).
+5. Find the Phone number and direct Google Maps Reviews URL.
+6. If you cannot find explicit hours for today's holiday/date anywhere, DO NOT GUESS. Simply state: "NO_EXPLICIT_HOLIDAY_DATA_FOUND."
+Write a 1-paragraph summary in Hebrew. DO NOT output JSON.`
+          },
+          {
+            role: "user",
+            content: `Name: ${placeName}, Address: ${address || city}, City: ${city}. Today is ${currentDate}.`
+          }
+        ]
+      });
+
+      const rawResearchText = perplexityResponse.choices?.[0]?.message?.content || "";
+      logger.info("=== RAW RESEARCH TEXT ===");
+      logger.info(rawResearchText);
+      logger.info("=========================");
+
+      // STEP 2: OPENAI CALL (The Judge)
+      const judgeResponse = await openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `You are a logic engine (The Judge). You receive raw web research (which may include extracted structured schedules/tables) from an AI Hunter.
+${timeInjection} 
+${dynamicContext} 
+Your job is to output a STRICT JSON object representing the real-time status.
+
+CRITICAL RULES:
+1. STRUCTURED DATA FIRST: If the research contains a row from an official schedule table, treat this as the absolute ground truth.
+2. UNCERTAINTY OVER GUESSING: If the research explicitly says "NO_EXPLICIT_HOLIDAY_DATA_FOUND" during a holiday or emergency, you MUST set "finalStatus" to "UNCERTAIN". Do NOT guess "OPEN" or "CLOSED" without real proof.
+3. URLs MUST be absolute (starting with https://). If you don't have a valid Google Maps review link, return null.
 
 Output schema:
 {
-  "finalStatus": "OPEN" | "CLOSED" | "UNCERTAIN",
+  "finalStatus": "OPEN" | "CLOSED" | "CLOSING_SOON" | "UNCERTAIN",
   "confidence": number (0.0 to 1.0),
   "specialCase": "NONE" | "HOLIDAY_OR_EVENT" | "SECURITY" | "VERIFIED_ONLINE",
-  "reason": "1 short, natural-sounding, native Hebrew sentence explaining the decision (e.g., 'המקום נסגר בעוד כ-10 דקות', 'העסק סגור היום'). Do not sound robotic or literal. If the math shows the place is currently CLOSED, BUT it has another shift starting later TODAY (Example: current time is 14:00, and hours are 08:00-13:00, 17:00-22:00), the reason MUST indicate when it reopens. Example: 'המקום סגור כעת, יפתח שוב בשעה 17:00'.",
-  "todayHours": string | "UNKNOWN",
+  "reason": "1 short, natural-sounding, native Hebrew sentence explaining the decision. If UNCERTAIN, explain that there is no official info for the holiday.",
+  "todayHours": "string representing the hours strictly in 'HH:MM - HH:MM' format using a hyphen (e.g., '10:00 - 15:00'), or null if unknown",
   "enrichedData": { 
     "phoneNumber": string|null, 
     "websiteUrl": string|null, 
     "googleMapsUrl": string|null, 
     "reviewsUrl": string|null, 
-    "imageUrl": string|null, 
     "ontopoUrl": string|null, 
     "todayHours": string|null,
     "rating": number|null
   }
 }`
-        },
-        {
-          role: "user",
-          content: `
-            Research Text: ${rawResearchText}
-            Current Date: ${currentDate}
-            Current Time (minutes from midnight): ${currentMinutes}
-            Static Opening Hours: ${JSON.stringify(openingHours)}
-            
-            Do the math and return the JSON.`
-        }
-      ]
-    });
-
-    // STEP 3: PARSING & FALLBACK
-    let result;
-    try {
-      const judgeContent = judgeResponse.choices?.[0]?.message?.content || "{}";
-      const parsed = JSON.parse(judgeContent);
-      
-      result = {
-        finalStatus: parsed.finalStatus || "UNCERTAIN",
-        confidence: parsed.confidence || 0,
-        specialCase: parsed.specialCase || "NONE",
-        reason: (parsed.reason || "לא ניתן לקבוע סטטוס ודאי").replace(/([*#])/g, '').trim(),
-        todayHours: parsed.todayHours || "UNKNOWN",
-        checkedAt: now,
-        aiUsed: true,
-        enrichedData: parsed.enrichedData || { 
-          phoneNumber: null, 
-          websiteUrl: null, 
-          googleMapsUrl: null, 
-          reviewsUrl: null, 
-          imageUrl: null, 
-          ontopoUrl: null, 
-          todayHours: null,
-          rating: null
-        }
-      };
-    } catch (e) {
-      logger.error("Error parsing Judge response:", e);
-      const fallbackStatus = calculateBaseStatus(openingHours, israelTime);
-      result = {
-        finalStatus: fallbackStatus,
-        confidence: 0.5,
-        specialCase: "NONE",
-        reason: "שגיאה בניתוח המידע, מסתמך על שעות רגילות.",
-        todayHours: "UNKNOWN",
-        checkedAt: now,
-        aiUsed: false,
-        enrichedData: { 
-          phoneNumber: null, 
-          websiteUrl: null, 
-          googleMapsUrl: null, 
-          reviewsUrl: null, 
-          imageUrl: null, 
-          ontopoUrl: null, 
-          todayHours: null,
-          rating: null
-        }
-      };
-    }
-
-    // 7. Global DB Sync (Affects all users) - Dual Update Strategy
-    if (placeId && result.confidence >= 0.9) {
-      const db = getDb();
-      if (db) {
-        (async () => {
-          try {
-            const placeRef = db.collection("places").doc(placeId);
-            const placeDoc = await placeRef.get();
-            const placeData = placeDoc.data() || {};
-            
-            const currentAiHours = result.enrichedData?.todayHours || result.todayHours;
-            const daysHe = ["יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "יום שבת"];
-            const todayHe = daysHe[israelTime.getDay()];
-            
-            let existingHoursArray = placeData.openingHours || [];
-            if (!Array.isArray(existingHoursArray)) existingHoursArray = [];
-            
-            const todayLineIndex = existingHoursArray.findIndex((line: string) => line && typeof line === 'string' && line.startsWith(todayHe));
-            const existingTodayHours = todayLineIndex !== -1 ? existingHoursArray[todayLineIndex].split(': ')[1] : null;
-            
-            const hoursConflict = currentAiHours && currentAiHours !== "UNKNOWN" && currentAiHours !== existingTodayHours;
-
-            const updateObj: any = {
-              liveCheckResult: {
-                ...result,
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-              }
-            };
-
-            // Branch A vs Branch B Logic
-            if (hoursConflict) {
-              if (result.specialCase === "NONE") {
-                // BRANCH A: Permanent Fix (Static hours were wrong or missing)
-                const newArray = [...existingHoursArray];
-                if (todayLineIndex !== -1) {
-                  newArray[todayLineIndex] = `${todayHe}: ${currentAiHours}`;
-                } else {
-                  // Day missing from array, add it
-                  newArray.push(`${todayHe}: ${currentAiHours}`);
-                }
-                updateObj.openingHours = newArray;
-                // Clear override if we fixed the source
-                updateObj.temporaryHoursOverride = admin.firestore.FieldValue.delete();
-              } else {
-                // BRANCH B: Temporary Mask (Holiday/Security/Special Event)
-                updateObj.temporaryHoursOverride = {
-                  date: currentDate,
-                  todayHours: currentAiHours,
-                  finalStatus: result.finalStatus,
-                  reason: result.reason
-                };
-              }
-            }
-
-            // Smart Enrichment: Only update missing fields
-            const enriched = result.enrichedData || {};
-            const fieldsToSync = ['phoneNumber', 'websiteUrl', 'googleMapsUrl', 'reviewsUrl', 'imageUrl', 'ontopoUrl', 'rating'];
-            
-            fieldsToSync.forEach(field => {
-              if (enriched[field] !== undefined && enriched[field] !== null && (!placeData[field] || placeData[field] === "")) {
-                // Special handling for rating to ensure it's a valid number
-                if (field === 'rating') {
-                  const r = parseFloat(enriched[field]);
-                  if (!isNaN(r) && r >= 0 && r <= 5) {
-                    updateObj[field] = r;
-                  }
-                } else {
-                  updateObj[field] = enriched[field];
-                }
-              }
-            });
-
-            await placeRef.set(updateObj, { merge: true });
-          } catch (err) {
-            logger.error("Global DB Sync Error:", err);
+          },
+          {
+            role: "user",
+            content: `
+              Research Text: ${rawResearchText}
+              Current Date: ${currentDate}
+              Current Time (minutes from midnight): ${currentMinutes}
+              Static Opening Hours: ${JSON.stringify(openingHours)}
+              
+              Do the math and return the JSON.`
           }
-        })();
+        ]
+      });
+
+      // STEP 3: PARSING & FALLBACK
+      let result;
+      try {
+        const judgeContent = judgeResponse.choices?.[0]?.message?.content || "{}";
+        const parsed = JSON.parse(judgeContent);
+        
+        // Safeguard: Replace " to " or " עד " with " - "
+        let formattedHours = parsed.todayHours || null;
+        if (formattedHours) {
+          formattedHours = formattedHours.replace(/\s*to\s*/gi, ' - ').replace(/\s*עד\s*/gi, ' - ');
+        }
+        
+        result = {
+          finalStatus: parsed.finalStatus || "UNCERTAIN",
+          confidence: parsed.confidence || 0,
+          specialCase: parsed.specialCase || "NONE",
+          reason: (parsed.reason || "לא ניתן לקבוע סטטוס ודאי").replace(/([*#])/g, '').trim(),
+          todayHours: formattedHours,
+          checkedAt: now,
+          aiUsed: true,
+          enrichedData: parsed.enrichedData || { 
+            phoneNumber: null, 
+            websiteUrl: null, 
+            googleMapsUrl: null, 
+            reviewsUrl: null, 
+            ontopoUrl: null, 
+            todayHours: null,
+            rating: null
+          }
+        };
+      } catch (e) {
+        logger.error("Error parsing Judge response:", e);
+        const fallbackStatus = calculateBaseStatus(openingHours, israelTime);
+        result = {
+          finalStatus: fallbackStatus,
+          confidence: 0.5,
+          specialCase: "NONE",
+          reason: "שגיאה בניתוח המידע, מסתמך על שעות רגילות.",
+          todayHours: null, // Changed to null
+          checkedAt: now,
+          aiUsed: false,
+          enrichedData: { 
+            phoneNumber: null, 
+            websiteUrl: null, 
+            googleMapsUrl: null, 
+            reviewsUrl: null, 
+            ontopoUrl: null, 
+            todayHours: null,
+            rating: null
+          }
+        };
       }
+
+      // 7. Global DB Sync (Affects all users) - Dual Update Strategy
+      if (placeId && result.confidence >= 0.9) {
+        const db = getDb();
+        if (db) {
+          (async () => {
+            try {
+              const placeRef = db.collection("places").doc(placeId);
+              const placeDoc = await placeRef.get();
+              const placeData = placeDoc.data() || {};
+              
+              const currentAiHours = result.enrichedData?.todayHours || result.todayHours;
+              const daysHe = ["יום ראשון", "יום שני", "יום שלישי", "יום רביעי", "יום חמישי", "יום שישי", "יום שבת"];
+              const todayHe = daysHe[israelTime.getDay()];
+              
+              let existingHoursArray = placeData.openingHours || [];
+              if (!Array.isArray(existingHoursArray)) existingHoursArray = [];
+              
+              const todayLineIndex = existingHoursArray.findIndex((line: string) => line && typeof line === 'string' && line.startsWith(todayHe));
+              const existingTodayHours = todayLineIndex !== -1 ? existingHoursArray[todayLineIndex].split(': ')[1] : null;
+              
+              const hoursConflict = currentAiHours && currentAiHours !== existingTodayHours;
+
+              const updateObj: any = {
+                liveCheckResult: {
+                  ...result,
+                  lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                }
+              };
+
+              // Branch A vs Branch B Logic
+              if (hoursConflict) {
+                if (result.specialCase === "NONE") {
+                  // BRANCH A: Permanent Fix (Static hours were wrong or missing)
+                  const newArray = [...existingHoursArray];
+                  if (todayLineIndex !== -1) {
+                    newArray[todayLineIndex] = `${todayHe}: ${currentAiHours}`;
+                  } else {
+                    // Day missing from array, add it
+                    newArray.push(`${todayHe}: ${currentAiHours}`);
+                  }
+                  updateObj.openingHours = newArray;
+                  // Clear override if we fixed the source
+                  updateObj.temporaryHoursOverride = admin.firestore.FieldValue.delete();
+                } else {
+                  // BRANCH B: Temporary Mask (Holiday/Security/Special Event)
+                  updateObj.temporaryHoursOverride = {
+                    date: currentDate,
+                    todayHours: currentAiHours,
+                    finalStatus: result.finalStatus,
+                    reason: result.reason
+                  };
+                }
+              }
+
+              // Smart Enrichment: Only update missing fields
+              const enriched = result.enrichedData || {};
+              const fieldsToSync = ['phoneNumber', 'websiteUrl', 'googleMapsUrl', 'reviewsUrl', 'ontopoUrl', 'rating'];
+              
+              fieldsToSync.forEach(field => {
+                if (enriched[field] !== undefined && enriched[field] !== null && (!placeData[field] || placeData[field] === "")) {
+                  // Special handling for rating to ensure it's a valid number
+                  if (field === 'rating') {
+                    const r = parseFloat(enriched[field]);
+                    if (!isNaN(r) && r >= 0 && r <= 5) {
+                      updateObj[field] = r;
+                    }
+                  } else {
+                    updateObj[field] = enriched[field];
+                  }
+                }
+              });
+
+              await placeRef.set(updateObj, { merge: true });
+            } catch (err) {
+              logger.error("Global DB Sync Error:", err);
+            }
+          })();
+        }
+      }
+
+      liveCheckCache.set(cacheKey, { data: result, timestamp: now });
+      
+      const tempOverride = {
+        date: currentDate,
+        todayHours: result.enrichedData?.todayHours || result.todayHours,
+        finalStatus: result.finalStatus,
+        reason: result.reason
+      };
+
+      res.json({
+        ...result,
+        temporaryHoursOverride: tempOverride
+      });
+
+    } catch (error) {
+      logger.error("Critical error in /live-check:", error);
+      res.json({ finalStatus: "UNCERTAIN", reason: "שגיאה בבדיקה בזמן אמת", checkedAt: Date.now(), aiUsed: false });
     }
-
-    liveCheckCache.set(cacheKey, { data: result, timestamp: now });
-    
-    const tempOverride = {
-      date: currentDate,
-      todayHours: result.enrichedData?.todayHours || result.todayHours,
-      finalStatus: result.finalStatus,
-      reason: result.reason
-    };
-
-    res.json({
-      ...result,
-      temporaryHoursOverride: tempOverride
-    });
-
-  } catch (error) {
-    logger.error("Critical error in /live-check:", error);
-    res.json({ finalStatus: "UNCERTAIN", reason: "שגיאה בבדיקה בזמן אמת", checkedAt: Date.now(), aiUsed: false });
-  }
-});
+  });
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
